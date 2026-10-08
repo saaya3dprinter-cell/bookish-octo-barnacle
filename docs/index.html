@@ -53,8 +53,17 @@
   .audioItem audio { height:36px; flex:1; min-width:220px; }
   #transcript p.seek { cursor:pointer; }
   .tag.speaker { cursor:pointer; font-weight:700; font-size:.8rem; }
-  .swap { border:1px solid #ccc; background:var(--card); color:var(--muted); border-radius:6px; padding:0 5px;
-          margin-left:3px; font-size:.75rem; cursor:pointer; line-height:1.4; }
+  .tag.pick { cursor:pointer; }
+  .tag.pick:hover { outline:2px solid var(--accent); }
+  #speakerMenu { position:fixed; z-index:20; min-width:200px; max-width:calc(100vw - 16px); background:var(--card); color:var(--fg);
+                 border-radius:12px; box-shadow:0 6px 24px rgba(0,0,0,.2); padding:6px; font-size:.95rem; }
+  #speakerMenu .menuTitle { font-size:.75rem; color:var(--muted); padding:4px 10px; }
+  #speakerMenu .menuItem { display:flex; align-items:center; gap:8px; width:100%; padding:10px; border:0; background:none;
+                 color:var(--fg); font:inherit; text-align:left; border-radius:8px; cursor:pointer; }
+  #speakerMenu .menuItem:hover, #speakerMenu .menuItem.current { background:rgba(255,122,26,.12); }
+  #speakerMenu .dot { width:14px; height:14px; border-radius:50%; flex:none; border:1px solid rgba(0,0,0,.15); }
+  #speakerMenu .check { margin-left:auto; color:var(--accent); font-weight:700; }
+  #speakerMenu hr { border:0; border-top:1px solid var(--line); margin:4px 0; }
   #transcript p.seek:hover { background:rgba(255,122,26,.08); border-radius:6px; }
   #transcript p.seek .meta::before { content:"▶ "; }
   .folder { margin-top:14px; }
@@ -341,25 +350,78 @@ function assignSpeakers(a, words) {
   render();
   const count = Object.keys(letters).length;
   toast(count > 1
-    ? `話した人を分けました（${count}人）。A・Bを押すと名前、⇄で話者を変えられます`
-    : "1人の声と判断されました。違うときは、行の ⇄ で話者を切り替えられます");
+    ? `話した人を分けました（${count}人）。A・Bの印を押すと、話者や名前を変えられます`
+    : "1人の声と判断されました。違うときは、行の印を押して話者を選べます");
 }
-// 1行だけ、話者を切り替える（A → B → C → … → A）
-function cycleSpeaker(e, a) {
+// 1行だけ、話者を変える（同じ録音で同じ人に名前があれば、その名前になる）
+function setSpeaker(e, a, key) {
   const doc = cur();
   const same = a ? doc.entries.filter((x) => offsetIn(a, x.time) !== null) : doc.entries;
-  // A から「ほかの行で使っている一番後ろの記号の次」まで（例: ほかが A と B なら A→B→C→A）
-  const max = Math.max(65, ...same.filter((x) => x !== e).map((x) => x.speaker).filter(Boolean).map((k) => k.charCodeAt(0)));
-  const options = Array.from({ length: Math.min(max - 65 + 2, 26) }, (_, i) => String.fromCharCode(65 + i));
-  const next = options[(options.indexOf(e.speaker) + 1) % options.length];
-  e.speaker = next;
-  const name = same.find((x) => x !== e && x.speaker === next && x.speakerName)?.speakerName;
+  e.speaker = key;
+  const name = same.find((x) => x !== e && x.speaker === key && x.speakerName)?.speakerName;
   if (name) e.speakerName = name; else delete e.speakerName;
   doc.updatedAt = Date.now();
   doc.dirty = true;
   persist();
   render();
 }
+// 話者の印を押したときのメニュー：だれが話したかを選ぶ・名前を変える
+function openSpeakerMenu(anchor, e, a) {
+  closeSpeakerMenu();
+  const doc = cur();
+  const same = a ? doc.entries.filter((x) => offsetIn(a, x.time) !== null) : doc.entries;
+  const people = {};
+  for (const x of same) if (x.speaker && !(x.speaker in people)) people[x.speaker] = "";
+  for (const x of same) if (x.speaker && x.speakerName) people[x.speaker] = x.speakerName;
+  const keys = Object.keys(people).sort();
+  let next = "A";
+  while (keys.includes(next) && next < "Z") next = String.fromCharCode(next.charCodeAt(0) + 1);
+
+  const menu = document.createElement("div");
+  menu.id = "speakerMenu";
+  const title = document.createElement("div");
+  title.className = "menuTitle";
+  title.textContent = "この行を話したのは";
+  menu.append(title);
+  const item = (label, color, onClick, current) => {
+    const b = document.createElement("button");
+    b.className = "menuItem" + (current ? " current" : "");
+    if (color) {
+      const dot = document.createElement("span");
+      dot.className = "dot";
+      dot.style.background = color;
+      b.append(dot);
+    }
+    b.append(document.createTextNode(label));
+    if (current) {
+      const check = document.createElement("span");
+      check.className = "check";
+      check.textContent = "✓";
+      b.append(check);
+    }
+    b.onclick = (ev) => { ev.stopPropagation(); closeSpeakerMenu(); onClick(); };
+    menu.append(b);
+  };
+  for (const k of keys) item(people[k] ? `${k}　${people[k]}` : k, speakerColor(k), () => setSpeaker(e, a, k), e.speaker === k);
+  item(`＋ 新しい人（${next}）`, null, () => setSpeaker(e, a, next));
+  if (e.speaker) {
+    const hr = document.createElement("hr");
+    menu.append(hr);
+    item(`✏ 「${speakerLabel(e)}」の名前を変える`, null, () => renameSpeaker(a, e.speaker));
+  }
+  document.body.append(menu);
+  // 押した印のすぐ下に出す（画面からはみ出さないように）
+  const r = anchor.getBoundingClientRect();
+  const w = menu.offsetWidth, h = menu.offsetHeight;
+  menu.style.left = Math.max(8, Math.min(r.left, innerWidth - w - 8)) + "px";
+  menu.style.top = (r.bottom + h + 8 < innerHeight ? r.bottom + 4 : Math.max(8, r.top - h - 4)) + "px";
+  setTimeout(() => document.addEventListener("click", closeSpeakerMenu, { once: true }), 0);
+}
+function closeSpeakerMenu() {
+  document.getElementById("speakerMenu")?.remove();
+}
+document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") closeSpeakerMenu(); });
+window.addEventListener("scroll", closeSpeakerMenu, true);
 // 録音ごとに、話者の名前を付け替える
 function renameSpeaker(a, key) {
   const doc = cur();
@@ -609,27 +671,21 @@ function render() {
     meta.textContent = e.time;
     const hit = findAudioAt(e.time);
     const tag = document.createElement("span");
-    let swap = null;
     if (e.speaker) {
-      // 話者（押すと名前を変えられる）
+      // 話者（押すと「だれが話したか」を選べる）
       tag.className = "tag speaker";
       tag.style.background = speakerColor(e.speaker);
-      tag.textContent = speakerLabel(e);
-      tag.title = "押すと名前を変えられます";
-      tag.onclick = (ev) => { ev.stopPropagation(); if (!isPhoneMode) renameSpeaker(hit?.audio, e.speaker); };
-      if (!isPhoneMode) {
-        swap = document.createElement("button");
-        swap.className = "swap";
-        swap.textContent = "⇄";
-        swap.title = "この行の話者を切り替える";
-        swap.onclick = (ev) => { ev.stopPropagation(); cycleSpeaker(e, hit?.audio); };
-      }
+      tag.textContent = speakerLabel(e) + (isPhoneMode ? "" : " ▾");
     } else {
       tag.className = "tag" + (e.source === "スマホ" ? " phone" : "");
-      tag.textContent = e.source;
+      tag.textContent = e.source + (isPhoneMode || !hit ? "" : " ▾");
+    }
+    if (!isPhoneMode && (e.speaker || hit)) {
+      tag.classList.add("pick");
+      tag.title = "押すと、だれが話したかを選べます";
+      tag.onclick = (ev) => { ev.stopPropagation(); openSpeakerMenu(tag, e, hit?.audio); };
     }
     meta.append(tag);
-    if (swap) meta.append(swap);
     para.append(meta, document.createTextNode(e.text));
     if (hit) {
       para.className = "seek";
@@ -1086,7 +1142,7 @@ async function cloudStart() {
   $("login").hidden = true;
   $("logout").hidden = false;
   $("accountText").textContent = "👤 " + cloud.email;
-  $("where").textContent = "Googleドライブの「文字起こし」フォルダに自動で保存されます。同じアカウントのスマホとPCで同じ内容が見られます。";
+  $("where").textContent = "「💾 保存」を押すと、Googleドライブの「文字起こし」フォルダに保存されます。同じアカウントのスマホとPCで同じ内容が見られます。";
 
   await cloudPull();
 
