@@ -207,7 +207,12 @@ function deleteAudiosOf(docId) {
 function saveRecording(docId, start, parts, mime) {
   if (!parts.length) return;
   const blob = new Blob(parts, { type: mime });
-  const a = { id: uid(), docId, start, duration: Math.round((Date.now() - start) / 1000), mime };
+  const duration = Math.round((Date.now() - start) / 1000);
+  if (isPhoneMode) { relaySendAudio(blob, start, duration, mime); return; }  // マイク役のスマホはPCに送る
+  saveRecordingBlob(docId, start, blob, mime, duration);
+}
+function saveRecordingBlob(docId, start, blob, mime, duration) {
+  const a = { id: uid(), docId, start, duration, mime };
   blobPut(a.id, blob).then(() => {
     lib.audios.push(a);
     persist();
@@ -306,21 +311,35 @@ const DB_KEY = "mojiokoshi-library-v1";
 const cloud = { on: false };  // Googleドライブ保存（下のほうで設定）
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 let lib = null;
-try { lib = JSON.parse(localStorage.getItem(DB_KEY) || "null"); } catch (_) {}
+// QRコードでつないだ「マイク役」のスマホは、PCに送るだけでスマホには保存しない
+if (!isPhoneMode) try { lib = JSON.parse(localStorage.getItem(DB_KEY) || "null"); } catch (_) {}
 if (!lib || !Array.isArray(lib.docs)) lib = { folders: [], docs: [], currentId: null };
 lib.audios ||= [];  // 録音データの一覧 [{id, docId, start, duration, mime, driveId}]（音そのものは IndexedDB）
 // 以前のバージョンの結果があれば1つの文字起こしとして引き継ぐ
-try {
+if (!isPhoneMode) try {
   const old = JSON.parse(localStorage.getItem("transcripts-v1") || "[]");
   if (old.length) {
     lib.docs.push({ id: uid(), name: "以前の文字起こし", folderId: "", createdAt: Date.now(), updatedAt: Date.now(), entries: old });
     localStorage.removeItem("transcripts-v1");
   }
 } catch (_) {}
-let storeKey = DB_KEY;  // Googleにログイン中は、その人用のキャッシュに切り替わる
+let storeKey = isPhoneMode ? null : DB_KEY;
+// QRでつないだスマホとのやりとり（PC側: つながっているスマホ / スマホ側: 録音を送る関数）
+const relayConns = new Set();
+let lastRelayName = "";
+let relaySendAudio = () => {};
+// PCで開いている文字起こしの名前を、つながっているスマホに知らせる
+function relayDocName() {
+  if (isPhoneMode || !relayConns.size || !lib.docs.length) return;
+  const name = cur().name;
+  if (name === lastRelayName) return;
+  lastRelayName = name;
+  for (const c of relayConns) if (c.open) c.send({ type: "doc", name });
+}  // Googleにログイン中は、その人用のキャッシュに切り替わる
 function persist() {
-  try { localStorage.setItem(storeKey, JSON.stringify(lib)); } catch (_) {}
+  if (storeKey) try { localStorage.setItem(storeKey, JSON.stringify(lib)); } catch (_) {}
   if (cloud.on) cloudChanged();
+  relayDocName();
 }
 
 function defaultName() {
@@ -399,6 +418,7 @@ function renderDocBar() {
     new Option("＋ 新しいフォルダ…", "__new"),
   );
   sel.value = doc.folderId || "";
+  relayDocName();
 }
 // ---------------------------------------------------------- ホーム（フォルダごとの一覧）
 let homeFolder = "all";
@@ -791,7 +811,7 @@ async function cloudStart() {
 
   // ログイン前にこの端末に保存していた分をドライブに移す（1回だけ聞く）
   const flag = "mojiokoshi-moved-" + cloud.email;
-  const localDocs = cloud.localLib.docs.filter((d) => d.entries?.length);
+  const localDocs = cloud.localLib.docs.filter((d) => d.entries?.length || !/^文字起こし \d+\/\d+ \d+:\d{2}$/.test(d.name));
   let asked = false;
   try { asked = !!localStorage.getItem(flag); } catch (_) {}
   if (localDocs.length && !asked) {
@@ -1408,16 +1428,32 @@ if (typeof Peer === "undefined" || typeof qrcode === "undefined") {
   $("phoneLink").textContent = phoneUrl;
   $("pairStatus").textContent = "スマホの接続を待っています…";
   peer.on("connection", (conn) => {
-    conn.on("open", () => { $("pairStatus").textContent = "✅ スマホがつながりました"; });
-    conn.on("data", (msg) => {
-      if (msg?.type === "final") { addEntry("スマホ", String(msg.text)); setLive(""); }
-      if (msg?.type === "interim") setLive(String(msg.text));
+    conn.on("open", () => {
+      $("pairStatus").textContent = "✅ スマホがつながりました";
+      relayConns.add(conn);
+      lastRelayName = "";
+      relayDocName();
     });
-    conn.on("close", () => { $("pairStatus").textContent = "スマホの接続が切れました。もう一度QRコードを読み取ってください。"; });
+    conn.on("data", (msg) => {
+      if (msg?.type === "final") { addEntry("スマホ", String(msg.text), Number(msg.at) || Date.now()); setLive(""); }
+      if (msg?.type === "interim") setLive(String(msg.text));
+      if (msg?.type === "audio" && msg.data) {
+        // スマホで録った声を、PCで開いている文字起こしに保存
+        const mime = String(msg.mime || "audio/webm");
+        saveRecordingBlob(cur().id, Number(msg.start) || Date.now(), new Blob([msg.data], { type: mime }), mime, Number(msg.duration) || 0);
+      }
+    });
+    conn.on("close", () => {
+      relayConns.delete(conn);
+      $("pairStatus").textContent = "スマホの接続が切れました。もう一度QRコードを読み取ってください。";
+    });
   });
   peer.on("error", (e) => { $("pairStatus").textContent = "接続の準備でエラー: " + e.type + "（ページを再読み込みしてください）"; });
 } else {
-  // スマホ側: PCにつないで、認識した文字を送る
+  // スマホ側: PCにつないで、認識した文字と録音を送る（スマホには保存しない）
+  for (const el of [$("homeBtn"), $("saveDoc"), $("newDoc"), $("docFolder"), $("clear")]) el.hidden = true;
+  $("docName").readOnly = true;
+  $("docName").value = "（PCにつないでいます…）";
   let conn = null;
   const peer = new Peer();
   const setStatus = (t) => { if (!recording) $("status").textContent = t; };
@@ -1425,6 +1461,12 @@ if (typeof Peer === "undefined" || typeof qrcode === "undefined") {
   peer.on("open", () => {
     conn = peer.connect(PREFIX + room, { reliable: true });
     conn.on("open", () => setStatus("✅ PCにつながりました。録音開始を押して話してください"));
+    conn.on("data", (msg) => {
+      if (msg?.type === "doc") {
+        $("docName").value = "💻 PCの「" + String(msg.name) + "」に送っています";
+        cur().name = String(msg.name);
+      }
+    });
     conn.on("close", () => { $("status").textContent = "PCとの接続が切れました。PCのQRコードをもう一度読み取ってください。"; });
   });
   peer.on("error", (e) => {
@@ -1432,9 +1474,14 @@ if (typeof Peer === "undefined" || typeof qrcode === "undefined") {
       ? "PCが見つかりません。PCでページを開いたまま、QRコードを読み取り直してください。"
       : "接続エラー: " + e.type;
   });
-  onFinal = (text) => {
-    addEntry("スマホ", text);
-    if (conn?.open) conn.send({ type: "final", text });
+  onFinal = (text, at = Date.now()) => {
+    addEntry("スマホ", text, at);
+    if (conn?.open) conn.send({ type: "final", text, at });
+    else showError("PCとつながっていないため、この文章はPCに届いていません。");
+  };
+  relaySendAudio = async (blob, start, duration, mime) => {
+    if (!conn?.open) { showError("PCとつながっていないため、録音をPCに送れませんでした。"); return; }
+    conn.send({ type: "audio", start, duration, mime, data: await blob.arrayBuffer() });
   };
   onInterim = (text) => { if (conn?.open) conn.send({ type: "interim", text }); };
 }
