@@ -2,6 +2,8 @@
   // Cloudflare Workers の設定。docs/ の中身をそのままサイトとして公開する
   "name": "bookish-octo-barnacle",
   "compatibility_date": "2025-09-01",
+  // workers.dev のURLで公開する
+  "workers_dev": true,
   "assets": {
     "directory": "./docs"
   }
