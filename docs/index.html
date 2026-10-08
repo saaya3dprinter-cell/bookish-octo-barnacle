@@ -38,7 +38,20 @@
          border:1px solid #ccc; background:var(--card); color:var(--fg); }
   #docName { flex:1; min-width:180px; font-weight:700; }
   button.primary { background:var(--accent); color:#fff; border-color:var(--accent); font-weight:700; }
-  #library summary { cursor:pointer; font-weight:700; }
+  .bigBtn { width:100%; padding:16px; font-size:1.15rem; font-weight:700; border:0; border-radius:12px;
+            background:var(--accent); color:#fff; cursor:pointer; margin-bottom:12px; }
+  .tabs { display:flex; gap:6px; flex-wrap:wrap; }
+  .tab { padding:7px 12px; border-radius:999px; border:1px solid #ccc; background:var(--card); color:var(--fg); cursor:pointer; font:inherit; font-size:.9rem; }
+  .tab.on { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:700; }
+  #recBadge { color:#d62f2f; border-color:#d62f2f; font-weight:700; }
+  #toast { position:fixed; left:50%; bottom:24px; transform:translateX(-50%); background:#222; color:#fff;
+           padding:10px 16px; border-radius:10px; font-size:.95rem; z-index:10; }
+  #audioList { margin-top:8px; }
+  .audioItem { display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:.85rem; color:var(--muted); margin:4px 0; }
+  .audioItem audio { height:36px; flex:1; min-width:220px; }
+  #transcript p.seek { cursor:pointer; }
+  #transcript p.seek:hover { background:rgba(255,122,26,.08); border-radius:6px; }
+  #transcript p.seek .meta::before { content:"▶ "; }
   .folder { margin-top:14px; }
   .folderHead { display:flex; align-items:center; gap:6px; font-weight:700; padding:6px 0; border-bottom:1px solid var(--line); }
   .folderHead .name { flex:1; }
@@ -72,7 +85,11 @@
 <body>
 <main>
   <div class="row">
-    <h1>🎙 音声文字起こし</h1>
+    <div style="display:flex;align-items:center;gap:8px">
+      <button class="small" id="homeBtn">🏠 ホーム</button>
+      <h1>🎙 音声文字起こし</h1>
+      <button class="small" id="recBadge" hidden>● 録音中</button>
+    </div>
     <div id="account" class="sub" style="margin:0" hidden>
       <span id="accountText"></span>
       <button class="small primary" id="login">Googleでログイン</button>
@@ -85,11 +102,22 @@
     このブラウザには「ブラウザ（簡易）」の音声認識がありません。「AI（高精度）」を使ってください。
   </div>
 
+  <section id="homeView" hidden>
+    <div class="card">
+      <button id="homeNew" class="bigBtn">＋ 新しく録音する</button>
+      <div class="tabs" id="folderTabs"></div>
+      <div id="homeFolderBar" class="row" style="margin:6px 0 4px"></div>
+      <div id="homeList"></div>
+    </div>
+  </section>
+
+  <section id="editorView">
   <div class="card">
     <div class="docBar">
       <input id="docName" placeholder="文字起こしの名前" aria-label="文字起こしの名前">
       <select id="docFolder" aria-label="入れるフォルダ"></select>
-      <button class="small primary" id="newDoc">＋ 新規</button>
+      <button class="small primary" id="saveDoc">💾 保存</button>
+      <button class="small" id="newDoc">＋ 新規</button>
     </div>
     <div class="row">
       <span class="sub" id="docInfo" style="margin:0"></span>
@@ -101,6 +129,7 @@
         <button class="small" id="clear">クリア</button>
       </div>
     </div>
+    <div id="audioList"></div>
     <div id="transcript"><div id="done"></div><p id="live" data-hint="「● 録音開始」を押して話すと、ここに文字がどんどん出てきます"></p></div>
   </div>
 
@@ -118,13 +147,6 @@
     <div id="error" hidden></div>
   </div>
 
-  <details class="card" id="library">
-    <summary>📁 保存した文字起こし（フォルダ）</summary>
-    <div class="sub" style="margin:8px 0 0">このブラウザの中に保存されます。名前を押すと開きます。</div>
-    <button class="small" id="newFolder" style="margin-top:8px">＋ フォルダを作る</button>
-    <div id="folders"></div>
-  </details>
-
   <div class="card" id="pairCard" hidden>
     <strong>📱 スマホをマイクにする</strong>
     <div class="sub" style="margin:6px 0 0">PCにマイクがないときは、スマホのカメラでこのQRコードを読み取ってください。スマホで話した内容がこの画面に出ます。</div>
@@ -132,6 +154,8 @@
     <div id="phoneLink"></div>
     <div id="pairStatus" class="sub" style="margin:6px 0 0"></div>
   </div>
+  </section>
+  <div id="toast" hidden></div>
 
 </main>
 <div id="printArea"></div>
@@ -148,6 +172,134 @@ $("where").textContent = isPhoneMode
   ? "このスマホのマイクで話すと、PCの画面に文字が届きます"
   : "このPCのマイクで録音できます。マイクがないときは下のQRコードでスマホをつなげます";
 
+// ---------------------------------------------------------- 録音データ（あとで聞ける）
+// 音そのものはこの端末の IndexedDB に、Googleにログイン中はドライブにも保存する
+let audioDbPromise = null;
+function audioDb() {
+  return audioDbPromise ||= new Promise((resolve, reject) => {
+    const r = indexedDB.open("mojiokoshi-audio", 1);
+    r.onupgradeneeded = () => r.result.createObjectStore("blobs");
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+  });
+}
+async function blobStore(mode, fn) {
+  const db = await audioDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("blobs", mode);
+    const req = fn(tx.objectStore("blobs"));
+    tx.oncomplete = () => resolve(req?.result);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+const blobPut = (id, blob) => blobStore("readwrite", (st) => st.put(blob, id));
+const blobGet = (id) => blobStore("readonly", (st) => st.get(id));
+const blobDel = (id) => blobStore("readwrite", (st) => st.delete(id));
+navigator.storage?.persist?.().catch(() => {});
+
+function audiosOf(docId) {
+  return lib.audios.filter((a) => a.docId === docId).sort((x, y) => x.start - y.start);
+}
+function deleteAudiosOf(docId) {
+  for (const a of audiosOf(docId)) blobDel(a.id).catch(() => {});
+  lib.audios = lib.audios.filter((a) => a.docId !== docId);
+}
+function saveRecording(docId, start, parts, mime) {
+  if (!parts.length) return;
+  const blob = new Blob(parts, { type: mime });
+  const a = { id: uid(), docId, start, duration: Math.round((Date.now() - start) / 1000), mime };
+  blobPut(a.id, blob).then(() => {
+    lib.audios.push(a);
+    persist();
+    render();
+  }).catch(() => showError("録音データを保存できませんでした（端末の空き容量を確認してください）"));
+}
+// 「11:42:45」のような時刻から、その時間を含む録音と何秒目かを探す
+function findAudioAt(time) {
+  const m = /^(\d{1,2}):(\d{2}):(\d{2})$/.exec(time || "");
+  if (!m) return null;
+  for (const a of audiosOf(cur().id)) {
+    const d = new Date(a.start);
+    d.setHours(+m[1], +m[2], +m[3], 0);
+    const offset = (d.getTime() - a.start) / 1000;
+    if (offset >= -2 && offset <= a.duration + 2) return { audio: a, offset: Math.max(0, offset - 0.5) };
+  }
+  return null;
+}
+const audioUrls = {};
+async function audioUrl(a) {
+  if (audioUrls[a.id]) return audioUrls[a.id];
+  let blob = await blobGet(a.id).catch(() => null);
+  if (!blob && a.driveId && cloud.on) {
+    blob = await gfetch(`/drive/v3/files/${a.driveId}?alt=media`, { raw: true });
+    blobPut(a.id, blob).catch(() => {});
+  }
+  if (!blob) return null;
+  return (audioUrls[a.id] = URL.createObjectURL(blob));
+}
+let audioListKey = "";
+function renderAudioList() {
+  const list = audiosOf(cur().id);
+  const key = cur().id + ":" + list.map((a) => a.id).join(",");
+  if (key === audioListKey) return;  // 再生中に作り直さないように
+  audioListKey = key;
+  $("audioList").replaceChildren(...list.map((a, i) => {
+    const row = document.createElement("div");
+    row.className = "audioItem";
+    row.dataset.id = a.id;
+    const label = document.createElement("span");
+    const d = new Date(a.start);
+    label.textContent = `🔊 録音${i + 1}（${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}〜 ${Math.floor(a.duration / 60)}分${a.duration % 60}秒）`;
+    const player = document.createElement("audio");
+    player.controls = true;
+    player.preload = "none";
+    const load = button("▶ 聞く", async () => { await loadPlayer(a, player, load); player.play(); });
+    row.append(label, load);
+    blobGet(a.id).then((b) => { if (b) loadPlayer(a, player, load); }).catch(() => {});
+    return row;
+  }));
+}
+async function loadPlayer(a, player, loadBtn) {
+  if (player.src) return;
+  loadBtn.textContent = "読み込み中…";
+  try {
+    const url = await audioUrl(a);
+    if (!url) { loadBtn.textContent = "この端末にありません"; return; }
+    player.src = url;
+    loadBtn.replaceWith(player);
+    await fixDuration(player);
+  } catch (e) {
+    loadBtn.textContent = "読み込めませんでした";
+  }
+}
+// ブラウザで録音した webm は長さが「不明」になり、途中から再生しにくいので直す
+function fixDuration(player) {
+  return new Promise((resolve) => {
+    const done = () => { player.currentTime = 0; resolve(); };
+    const check = () => {
+      if (player.duration !== Infinity && !Number.isNaN(player.duration)) return resolve();
+      player.addEventListener("durationchange", () => { if (player.duration !== Infinity) done(); }, { once: true });
+      player.currentTime = 1e101;
+    };
+    if (player.readyState >= 1) check(); else player.addEventListener("loadedmetadata", check, { once: true });
+    setTimeout(resolve, 3000);
+  });
+}
+async function playAudioAt(a, offset) {
+  const row = $("audioList").querySelector(`[data-id="${a.id}"]`);
+  if (!row) return;
+  let player = row.querySelector("audio");
+  if (!player || !player.src) {
+    const btn = row.querySelector("button");
+    player = document.createElement("audio");
+    player.controls = true;
+    await loadPlayer(a, player, btn);
+    if (!player.src) return;
+  }
+  const go = () => { player.currentTime = offset; player.play(); };
+  if (player.readyState >= 1) go(); else player.addEventListener("loadedmetadata", go, { once: true });
+}
+
 // ---------------------------------------------------------- 保存データ（フォルダ・文字起こし）
 // { folders:[{id,name}], docs:[{id,name,folderId,createdAt,updatedAt,entries:[{time,source,text}]}], currentId }
 const DB_KEY = "mojiokoshi-library-v1";
@@ -156,6 +308,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 let lib = null;
 try { lib = JSON.parse(localStorage.getItem(DB_KEY) || "null"); } catch (_) {}
 if (!lib || !Array.isArray(lib.docs)) lib = { folders: [], docs: [], currentId: null };
+lib.audios ||= [];  // 録音データの一覧 [{id, docId, start, duration, mime, driveId}]（音そのものは IndexedDB）
 // 以前のバージョンの結果があれば1つの文字起こしとして引き継ぐ
 try {
   const old = JSON.parse(localStorage.getItem("transcripts-v1") || "[]");
@@ -224,8 +377,15 @@ function render() {
     tag.textContent = e.source;
     meta.append(tag);
     para.append(meta, document.createTextNode(e.text));
+    const hit = findAudioAt(e.time);
+    if (hit) {
+      para.className = "seek";
+      para.title = "押すとこの部分の録音を再生";
+      para.onclick = () => playAudioAt(hit.audio, hit.offset);
+    }
     return para;
   }));
+  renderAudioList();
   $("docInfo").textContent = `📁 ${folderName(cur().folderId)} ・ ${entries.length}件`;
   scrollToEnd();
 }
@@ -240,67 +400,131 @@ function renderDocBar() {
   );
   sel.value = doc.folderId || "";
 }
-function renderLibrary() {
-  const groups = [{ id: "", name: "未分類" }, ...lib.folders];
-  $("folders").replaceChildren(...groups.map((f) => {
-    const box = document.createElement("div");
-    box.className = "folder";
-    const head = document.createElement("div");
-    head.className = "folderHead";
-    const name = document.createElement("span");
-    name.className = "name";
-    name.textContent = "📁 " + f.name;
-    head.append(name);
-    if (f.id) {
-      head.append(
-        button("名前変更", () => {
-          const n = prompt("フォルダの名前", f.name);
-          if (n?.trim()) { f.name = n.trim(); persist(); renderAll(); }
-        }),
-        button("削除", () => {
-          if (!confirm(`フォルダ「${f.name}」を削除しますか？\n中の文字起こしは「未分類」に移ります。`)) return;
-          lib.docs.forEach((d) => { if (d.folderId === f.id) d.folderId = ""; });
-          lib.folders = lib.folders.filter((x) => x !== f);
-          persist(); renderAll();
-        }),
-      );
-    }
-    box.append(head);
-    const docs = lib.docs.filter((d) => (d.folderId || "") === f.id).sort((a, b) => b.updatedAt - a.updatedAt);
-    if (!docs.length) {
-      const e = document.createElement("div");
-      e.className = "empty";
-      e.textContent = "まだありません";
-      box.append(e);
-    }
-    for (const d of docs) {
-      const item = document.createElement("div");
-      item.className = "docItem" + (d.id === lib.currentId ? " current" : "");
-      const open = document.createElement("button");
-      open.className = "open";
-      open.textContent = d.name;
-      const info = document.createElement("div");
-      info.className = "info";
-      info.textContent = `${fmtDate(d.updatedAt)} ・ ${countOf(d)}件` + (d.id === lib.currentId ? " ・ 表示中" : "");
-      open.append(info);
-      open.onclick = () => { openDoc(d.id); window.scrollTo({ top: 0, behavior: "smooth" }); };
-      const move = document.createElement("select");
-      move.setAttribute("aria-label", "フォルダを移動");
-      move.append(new Option("移動…", "__"), new Option("未分類", ""), ...lib.folders.map((x) => new Option(x.name, x.id)));
-      move.onchange = () => {
-        if (move.value !== "__") { d.folderId = move.value; persist(); renderAll(); }
-      };
-      item.append(open, move, button("削除", () => {
-        if (!confirm(cloud.on ? `「${d.name}」を削除しますか？（Googleドライブのゴミ箱に移ります）` : `「${d.name}」を削除しますか？（元に戻せません）`)) return;
-        lib.docs = lib.docs.filter((x) => x !== d);
-        if (lib.currentId === d.id) { lib.currentId = null; openDoc(cur().id); }
+// ---------------------------------------------------------- ホーム（フォルダごとの一覧）
+let homeFolder = "all";
+function renderHome() {
+  if (homeFolder !== "all" && homeFolder !== "" && !lib.folders.some((f) => f.id === homeFolder)) homeFolder = "all";
+  const tab = (label, id) => {
+    const b = document.createElement("button");
+    b.className = "tab" + (homeFolder === id ? " on" : "");
+    b.textContent = label;
+    b.onclick = () => { homeFolder = id; renderHome(); };
+    return b;
+  };
+  const count = (id) => lib.docs.filter((d) => id === "all" || (d.folderId || "") === id).length;
+  $("folderTabs").replaceChildren(
+    tab(`すべて (${count("all")})`, "all"),
+    tab(`未分類 (${count("")})`, ""),
+    ...lib.folders.map((f) => tab(`📁 ${f.name} (${count(f.id)})`, f.id)),
+    button("＋ フォルダ", () => { const f = createFolder(); if (f) { homeFolder = f.id; renderAll(); } }),
+  );
+
+  // 選んでいるフォルダの名前変更・削除
+  const bar = $("homeFolderBar");
+  const folder = lib.folders.find((f) => f.id === homeFolder);
+  bar.replaceChildren();
+  if (folder) {
+    const title = document.createElement("strong");
+    title.textContent = "📁 " + folder.name;
+    const actions = document.createElement("div");
+    actions.append(
+      button("名前変更", () => {
+        const n = prompt("フォルダの名前", folder.name);
+        if (n?.trim()) { folder.name = n.trim(); persist(); renderAll(); }
+      }),
+      button("フォルダ削除", () => {
+        if (!confirm(`フォルダ「${folder.name}」を削除しますか？\n中の文字起こしは「未分類」に移ります。`)) return;
+        lib.docs.forEach((d) => { if (d.folderId === folder.id) d.folderId = ""; });
+        lib.folders = lib.folders.filter((x) => x !== folder);
+        homeFolder = "all";
         persist(); renderAll();
-      }));
-      box.append(item);
-    }
-    return box;
+      }),
+    );
+    bar.append(title, actions);
+  }
+
+  const docs = lib.docs
+    .filter((d) => homeFolder === "all" || (d.folderId || "") === homeFolder)
+    .sort((x, y) => y.updatedAt - x.updatedAt);
+  if (!docs.length) {
+    const e = document.createElement("div");
+    e.className = "empty";
+    e.textContent = "まだありません。「＋ 新しく録音する」から始められます。";
+    $("homeList").replaceChildren(e);
+    return;
+  }
+  $("homeList").replaceChildren(...docs.map((d) => {
+    const item = document.createElement("div");
+    item.className = "docItem" + (d.id === lib.currentId ? " current" : "");
+    const open = document.createElement("button");
+    open.className = "open";
+    open.textContent = d.name;
+    const info = document.createElement("div");
+    info.className = "info";
+    const audios = audiosOf(d.id).length;
+    info.textContent = `${fmtDate(d.updatedAt)} ・ ${countOf(d)}件` + (audios ? ` ・ 🔊 録音${audios}` : "") +
+      (homeFolder === "all" ? ` ・ 📁 ${folderName(d.folderId)}` : "");
+    open.append(info);
+    open.onclick = () => { openDoc(d.id); showView("editor"); };
+    const move = document.createElement("select");
+    move.setAttribute("aria-label", "フォルダを移動");
+    move.append(new Option("移動…", "__"), new Option("未分類", ""), ...lib.folders.map((x) => new Option(x.name, x.id)));
+    move.onchange = () => {
+      if (move.value !== "__") { d.folderId = move.value; persist(); renderAll(); }
+    };
+    item.append(open, move, button("削除", () => {
+      if (!confirm(cloud.on ? `「${d.name}」を削除しますか？（Googleドライブのゴミ箱に移ります）` : `「${d.name}」を削除しますか？（元に戻せません）`)) return;
+      lib.docs = lib.docs.filter((x) => x !== d);
+      deleteAudiosOf(d.id);
+      if (lib.currentId === d.id) { lib.currentId = null; openDoc(cur().id); }
+      persist(); renderAll();
+    }));
+    return item;
   }));
 }
+
+// 画面の切り替え（ホーム ⇔ 文字起こし）
+function showView(name) {
+  const home = name === "home";
+  $("homeView").hidden = !home;
+  $("editorView").hidden = home;
+  $("homeBtn").hidden = home;
+  if (home) renderHome();
+  const hash = home ? "#home" : "";
+  if (location.hash !== hash) history.pushState(null, "", hash || location.pathname + location.search);
+  window.scrollTo({ top: 0 });
+}
+window.addEventListener("popstate", () => showView(location.hash === "#home" ? "home" : "editor"));
+$("homeBtn").onclick = () => showView("home");
+$("recBadge").onclick = () => showView("editor");
+$("homeNew").onclick = () => {
+  const doc = newDoc(homeFolder === "all" ? "" : homeFolder);
+  openDoc(doc.id);
+  showView("editor");
+};
+
+function toast(msg) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.hidden = false;
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => { t.hidden = true; }, 2200);
+}
+$("saveDoc").onclick = async () => {
+  const name = $("docName").value.trim();
+  if (name) cur().name = name;
+  cur().updatedAt = Date.now();
+  persist();
+  renderAll();
+  if (cloud.on) {
+    clearTimeout(cloud.pushTimer);
+    await cloudSync();
+    toast(cloud.token ? "Googleドライブに保存しました" : "この端末に保存しました（ドライブはつなぎ直したあとに保存されます）");
+  } else {
+    toast("保存しました");
+  }
+};
+
 function button(label, onclick) {
   const b = document.createElement("button");
   b.className = "small";
@@ -308,7 +532,7 @@ function button(label, onclick) {
   b.onclick = onclick;
   return b;
 }
-function renderAll() { render(); renderDocBar(); renderLibrary(); }
+function renderAll() { render(); renderDocBar(); if (!$("homeView").hidden) renderHome(); }
 
 function createFolder() {
   const n = prompt("新しいフォルダの名前（例：お客さん名、作品名）");
@@ -322,7 +546,6 @@ function createFolder() {
 $("docName").oninput = () => {
   cur().name = $("docName").value.trim() || defaultName();
   persist();
-  renderLibrary();
 };
 $("docName").onblur = () => renderDocBar();
 $("docFolder").onchange = () => {
@@ -338,7 +561,6 @@ $("newDoc").onclick = () => {
   $("docName").focus();
   $("docName").select();
 };
-$("newFolder").onclick = () => { if (createFolder()) renderAll(); };
 
 // 話している途中の文字（まだ確定していない部分）をそのまま表示
 function setLive(text) {
@@ -349,14 +571,13 @@ function scrollToEnd() {
   const box = $("transcript");
   box.scrollTop = box.scrollHeight;
 }
-function addEntry(source, text) {
+function addEntry(source, text, at = Date.now()) {
   text = text.trim();
   if (!text) return;
-  entries.push({ time: new Date().toLocaleTimeString("ja-JP"), source, text });
+  entries.push({ time: new Date(at).toLocaleTimeString("ja-JP"), source, text });
   cur().updatedAt = Date.now();
   persist();
   render();
-  renderLibrary();
 }
 renderAll();
 
@@ -462,6 +683,7 @@ $("clear").onclick = () => {
   if (confirm(`「${cur().name}」の中身を全部消しますか？`)) { entries.length = 0; persist(); renderAll(); }
 };
 
+
 // ---------------------------------------------------------- Googleドライブに保存（各自のドライブ）
 // ログインすると、文字起こしが自分のGoogleドライブの「文字起こし」フォルダに Googleドキュメントとして保存される。
 // 同じアカウントでログインしたスマホとPCは、数秒ごとにドライブを見て同じ内容になる。
@@ -471,7 +693,7 @@ const DOC_MIME = "application/vnd.google-apps.document";
 const FOLDER_MIME = "application/vnd.google-apps.folder";
 Object.assign(cloud, {
   tokenClient: null, token: null, exp: 0, email: "", rootId: null,
-  snap: { folders: {}, docs: {} },  // 最後にドライブと同じだった状態
+  snap: { folders: {}, docs: {}, audios: {} },  // 最後にドライブと同じだった状態
   pushTimer: null, pollTimer: null, busy: false, again: false, localLib: null,
 });
 
@@ -529,6 +751,7 @@ async function gfetch(path, opts = {}) {
   });
   if (res.status === 401) { cloud.token = null; cloudNeedLogin(); throw new Error("ログインが切れました"); }
   if (!res.ok) throw new Error(`Google ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  if (opts.raw) return opts.raw === "response" ? res : res.blob();
   const type = res.headers.get("content-type") || "";
   return type.includes("json") ? res.json() : res.text();
 }
@@ -553,7 +776,9 @@ async function cloudStart() {
   let cached = null;
   try { cached = JSON.parse(localStorage.getItem(storeKey) || "null"); } catch (_) {}
   lib = cached?.lib || { folders: [], docs: [], currentId: null };
+  lib.audios ||= [];
   cloud.snap = cached?.snap || { folders: {}, docs: {} };
+  cloud.snap.audios ||= {};
   cloud.on = true;
   try { localStorage.setItem("mojiokoshi-google", "1"); } catch (_) {}
 
@@ -694,6 +919,8 @@ async function cloudPush() {
       const mp = multipart(meta, toText(d.entries));
       const created = await gfetch("/upload/drive/v3/files?uploadType=multipart&fields=id,modifiedTime", { method: "POST", ...mp });
       if (lib.currentId === d.id) lib.currentId = created.id;
+      lib.audios.forEach((a) => { if (a.docId === d.id) a.docId = created.id; });
+      if (ai?.docId === d.id) ai.docId = created.id;
       d.id = created.id;
       snap.docs[d.id] = { name: d.name, folderId: d.folderId, sig: sig(d.entries), modified: created.modifiedTime };
       continue;
@@ -721,6 +948,31 @@ async function cloudPush() {
     s.folderId = d.folderId;
     s.modified = res.modifiedTime;
   }
+  // 録音データをドライブへ（文字起こしと同じフォルダに入れる）
+  for (const a of lib.audios) {
+    const doc = lib.docs.find((d) => d.id === a.docId);
+    if (a.driveId || !doc || !snap.docs[doc.id]) continue;
+    const blob = await blobGet(a.id).catch(() => null);
+    if (!blob) continue;
+    const t = new Date(a.start);
+    const ext = a.mime.includes("mp4") ? "m4a" : "webm";
+    const start = await gfetch("/upload/drive/v3/files?uploadType=resumable&fields=id", {
+      method: "POST",
+      raw: "response",
+      headers: { "Content-Type": "application/json; charset=UTF-8", "X-Upload-Content-Type": a.mime },
+      body: JSON.stringify({
+        name: `${doc.name}_録音_${t.getHours()}${String(t.getMinutes()).padStart(2, "0")}.${ext}`,
+        mimeType: a.mime.split(";")[0],
+        parents: [parentOf(doc.folderId)],
+        appProperties: { mojiokoshi: "audio", doc: doc.id, start: String(a.start), duration: String(a.duration) },
+      }),
+    });
+    const location = start.headers.get("Location");
+    if (!location) continue;
+    const up = await gfetch(location, { method: "PUT", headers: { "Content-Type": a.mime.split(";")[0] }, body: blob });
+    a.driveId = up.id;
+    snap.audios[up.id] = true;
+  }
   // 削除（ドライブのゴミ箱へ）
   const trash = (id) => gfetch(`/drive/v3/files/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ trashed: true }) });
   for (const id of Object.keys(snap.docs)) {
@@ -729,16 +981,37 @@ async function cloudPush() {
   for (const id of Object.keys(snap.folders)) {
     if (!lib.folders.some((f) => f.id === id)) { await trash(id).catch(() => {}); delete snap.folders[id]; }
   }
+  for (const id of Object.keys(snap.audios)) {
+    if (!lib.audios.some((a) => a.driveId === id)) { await trash(id).catch(() => {}); delete snap.audios[id]; }
+  }
 }
 
 // ---- ドライブの変更（別の端末で録音した分など）をこの端末へ
 async function cloudPull() {
-  const query = "trashed=false and (appProperties has { key='mojiokoshi' and value='doc' } or appProperties has { key='mojiokoshi' and value='folder' })";
+  const query = "trashed=false and (appProperties has { key='mojiokoshi' and value='doc' } or appProperties has { key='mojiokoshi' and value='folder' } or appProperties has { key='mojiokoshi' and value='audio' })";
   const list = await gfetch(`/drive/v3/files?q=${q(query)}&pageSize=1000&fields=files(id,name,mimeType,parents,modifiedTime,appProperties)`);
   const snap = cloud.snap;
   const remoteFolders = list.files.filter((f) => f.mimeType === FOLDER_MIME);
   const remoteDocs = list.files.filter((f) => f.mimeType === DOC_MIME);
+  const remoteAudios = list.files.filter((f) => f.appProperties?.mojiokoshi === "audio");
   let changed = false;
+
+  for (const ra of remoteAudios) {
+    if (!lib.audios.some((a) => a.driveId === ra.id)) {
+      const p = ra.appProperties;
+      lib.audios.push({ id: ra.id, driveId: ra.id, docId: p.doc, start: Number(p.start) || 0, duration: Number(p.duration) || 0, mime: ra.mimeType });
+      changed = true;
+    }
+    snap.audios[ra.id] = true;
+  }
+  for (const a of [...lib.audios]) {
+    if (a.driveId && snap.audios[a.driveId] && !remoteAudios.some((r) => r.id === a.driveId)) {
+      lib.audios = lib.audios.filter((x) => x !== a);
+      blobDel(a.id).catch(() => {});
+      delete snap.audios[a.driveId];
+      changed = true;
+    }
+  }
 
   for (const rf of remoteFolders) {
     const f = lib.folders.find((x) => x.id === rf.id);
@@ -788,6 +1061,7 @@ async function cloudPull() {
   for (const d of [...lib.docs]) {
     if (snap.docs[d.id] && !remoteDocs.some((r) => r.id === d.id)) {
       lib.docs = lib.docs.filter((x) => x !== d);
+      lib.audios = lib.audios.filter((a) => a.docId !== d.id);
       delete snap.docs[d.id];
       changed = true;
     }
@@ -813,7 +1087,7 @@ function showRemoteUpdate(d) {
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 let recording = false, wakeLock = null;
-let onFinal = (text) => addEntry(isMobile ? "スマホ" : "PC", text);
+let onFinal = (text, at) => addEntry(isMobile ? "スマホ" : "PC", text, at);
 let onInterim = () => {};
 let engine = "ai";
 try { engine = localStorage.getItem("mojiokoshi-engine") || "ai"; } catch (_) {}
@@ -838,6 +1112,7 @@ function startRec() {
   recording = true;
   $("rec").textContent = "■ 停止";
   $("rec").classList.add("on");
+  $("recBadge").hidden = false;
   $("status").textContent = "マイクを準備中…";
   navigator.wakeLock?.request("screen").then((l) => (wakeLock = l)).catch(() => {});
   if (engine === "ai") startAi(); else startBrowser();
@@ -848,6 +1123,7 @@ function stopRec() {
   stopBrowser();
   $("rec").textContent = "● 録音開始";
   $("rec").classList.remove("on");
+  $("recBadge").hidden = true;
   if (!aiPending) setLive("");
   $("status").textContent = "";
   onInterim("");
@@ -907,7 +1183,20 @@ async function startAi() {
   await ctx.resume();
   const src = ctx.createMediaStreamSource(stream);
   const proc = ctx.createScriptProcessor(4096, 1, 1);
-  ai = { stream, ctx, src, proc, chunks: [], samples: 0, silence: 0, hadSpeech: false, level: 0, quietSince: performance.now() };
+  ai = { stream, ctx, src, proc, chunks: [], samples: 0, silence: 0, hadSpeech: false, level: 0, quietSince: performance.now(),
+         chunkStart: Date.now(), docId: cur().id, recorder: null, parts: [], recStart: Date.now() };
+  // あとで聞けるように、声そのものも録音しておく
+  const mime = ["audio/webm;codecs=opus", "audio/mp4", "audio/webm"].find((t) => window.MediaRecorder?.isTypeSupported?.(t));
+  if (mime) {
+    try {
+      const rec = new MediaRecorder(stream, { mimeType: mime, audioBitsPerSecond: 32000 });
+      const parts = ai.parts;
+      rec.ondataavailable = (e) => { if (e.data.size) parts.push(e.data); };
+      rec.start(1000);
+      ai.recorder = rec;
+      ai.mime = mime;
+    } catch (_) {}
+  }
   proc.onaudioprocess = (e) => onAiAudio(e.inputBuffer.getChannelData(0));
   src.connect(proc);
   proc.connect(ctx.destination);
@@ -916,6 +1205,12 @@ async function startAi() {
 function stopAi() {
   if (!ai) return;
   flushAi();
+  if (ai.recorder) {
+    const { recorder, parts, recStart, mime } = ai;
+    const docId = ai.docId;
+    recorder.onstop = () => saveRecording(docId, recStart, parts, mime);
+    try { recorder.stop(); } catch (_) {}
+  }
   ai.proc.disconnect();
   ai.src.disconnect();
   ai.stream.getTracks().forEach((t) => t.stop());
@@ -937,6 +1232,7 @@ function onAiAudio(data) {
   else if (now - ai.quietSince > 3000) setLevelText("音が聞こえません");
 
   // 話の切れ目で区切る
+  if (!ai.samples) ai.chunkStart = Date.now() - (block.length / ai.ctx.sampleRate) * 1000;
   ai.chunks.push(block);
   ai.samples += block.length;
   if (rms > SILENCE_RMS) { ai.hadSpeech = true; ai.silence = 0; } else { ai.silence += block.length / ai.ctx.sampleRate; }
@@ -950,11 +1246,12 @@ function flushAi() {
   for (const c of ai.chunks) { all.set(c, off); off += c.length; }
   const speech = ai.hadSpeech;
   const rate = ai.ctx.sampleRate;
+  const at = ai.chunkStart;
   ai.chunks = []; ai.samples = 0; ai.silence = 0; ai.hadSpeech = false;
   if (!speech) return; // 無音だけなら送らない
-  sendToAi(encodeWav(downsample(all, rate, TARGET_RATE), TARGET_RATE));
+  sendToAi(encodeWav(downsample(all, rate, TARGET_RATE), TARGET_RATE), at);
 }
-function sendToAi(wav) {
+function sendToAi(wav, at) {
   aiPending++;
   showPending();
   // 順番が入れ替わらないように1つずつ送る
@@ -963,7 +1260,7 @@ function sendToAi(wav) {
       const res = await fetch("/api/transcribe", { method: "POST", body: wav, headers: { "Content-Type": "audio/wav" } });
       const data = await res.json().catch(() => ({}));
       if (res.ok) {
-        if (data.text) onFinal(data.text);
+        if (data.text) onFinal(data.text, at);
       } else if (data.error === "quota") {
         fallbackToBrowser("今日のAIの無料分を使い切りました（料金はかかりません。明日また使えます）。");
       } else if (res.status === 404 || res.status === 405) {
