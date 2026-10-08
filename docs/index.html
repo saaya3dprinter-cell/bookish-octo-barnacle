@@ -902,6 +902,10 @@ function renderHome() {
           label: `📁 ${f.name} へ移動`, current: (d.folderId || "") === f.id,
           onClick: () => { d.folderId = f.id; persist(); renderAll(); },
         })),
+        { label: "📁＋ 新しいフォルダを作って移動", onClick: () => {
+          const f = createFolder();
+          if (f) { d.folderId = f.id; persist(); renderAll(); toast(`「${f.name}」を作って移動しました`); }
+        } },
         "-",
         { label: "🗑 削除", danger: true, onClick: () => {
           if (!confirm(cloud.on ? `「${d.name}」を削除しますか？（Googleドライブのゴミ箱に移ります）` : `「${d.name}」を削除しますか？（元に戻せません）`)) return;
