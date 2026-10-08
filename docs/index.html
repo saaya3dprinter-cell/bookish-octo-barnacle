@@ -33,6 +33,17 @@
   #level { height:100%; width:0; background:#2bb673; border-radius:6px; transition: width .06s linear; }
   #level.pulse { width:60%; animation: pulse .6s ease-in-out infinite alternate; }
   @keyframes pulse { from { width:25%; } to { width:85%; } }
+  #error { background:#ffe1e1; color:#8a1010; padding:10px 12px; border-radius:10px; margin-top:8px; font-size:.95rem; }
+  #printArea { display:none; }
+  @media print {
+    body { background:#fff; color:#000; }
+    main { display:none; }
+    #printArea { display:block; font-family: "Yu Mincho", "Hiragino Mincho ProN", serif; }
+    #printArea h1 { font-size:18pt; margin:0 0 4pt; }
+    #printArea .date { font-size:10pt; color:#555; margin-bottom:14pt; }
+    #printArea p { font-size:11pt; line-height:1.8; margin:0 0 6pt; }
+    #printArea .meta { font-size:8pt; color:#666; margin-right:6pt; }
+  }
   #status { font-size:.9rem; color:var(--muted); margin-top:6px; }
   #qr { display:flex; justify-content:center; margin:10px 0; }
   #qr img { background:#fff; padding:8px; border-radius:8px; width:200px; height:200px; image-rendering: pixelated; }
@@ -57,7 +68,9 @@
       <strong>文字起こし</strong>
       <div>
         <button class="small" id="copy">コピー</button>
-        <button class="small" id="save">.txt保存</button>
+        <button class="small" id="word">Word</button>
+        <button class="small" id="pdf">PDF</button>
+        <button class="small" id="save">.txt</button>
         <button class="small" id="clear">クリア</button>
       </div>
     </div>
@@ -68,6 +81,7 @@
     <button id="rec">● 録音開始</button>
     <div class="meterRow"><span>🎤</span><div class="meter"><div id="level"></div></div><span id="levelText">停止中</span></div>
     <div id="status"></div>
+    <div id="error" hidden></div>
   </div>
 
   <div class="card" id="pairCard" hidden>
@@ -79,6 +93,7 @@
   </div>
 
 </main>
+<div id="printArea"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
@@ -136,13 +151,98 @@ $("copy").onclick = async () => {
   try { await navigator.clipboard.writeText(text); alert("コピーしました"); }
   catch (_) { prompt("コピーしてください", text); }
 };
-$("save").onclick = () => {
-  const text = entries.map((e) => `[${e.time}] (${e.source}) ${e.text}`).join("\n");
+// ---------------------------------------------------------- 出力（txt / Word / PDF）
+function today() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function downloadBlob(blob, filename) {
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
-  a.download = `文字起こし_${new Date().toISOString().slice(0, 10)}.txt`;
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.append(a);
   a.click();
-  URL.revokeObjectURL(a.href);
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+function hasEntries() {
+  if (entries.length) return true;
+  alert("まだ文字起こしがありません");
+  return false;
+}
+
+$("save").onclick = () => {
+  if (!hasEntries()) return;
+  const text = entries.map((e) => `[${e.time}] (${e.source}) ${e.text}`).join("\n");
+  downloadBlob(new Blob([text], { type: "text/plain" }), `mojiokoshi_${today()}.txt`);
+};
+
+// Word（.docx）: ライブラリは大きいので、ボタンを押したときだけ読み込む
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const el = document.createElement("script");
+    el.src = src;
+    el.onload = resolve;
+    el.onerror = () => reject(new Error("読み込み失敗"));
+    document.head.append(el);
+  });
+}
+$("word").onclick = async () => {
+  if (!hasEntries()) return;
+  const btn = $("word");
+  btn.disabled = true;
+  btn.textContent = "作成中…";
+  try {
+    if (!window.docx) await loadScript("https://cdn.jsdelivr.net/npm/docx@9.5.1/dist/index.iife.js");
+    const { Document, Packer, Paragraph, TextRun, HeadingLevel } = window.docx;
+    const font = { ascii: "Yu Gothic", eastAsia: "Yu Gothic", hAnsi: "Yu Gothic" };
+    const doc = new Document({
+      styles: { default: { document: { run: { font, size: 22 } } } },
+      sections: [{
+        children: [
+          new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun({ text: "文字起こし", font })] }),
+          new Paragraph({ children: [new TextRun({ text: today(), color: "666666", size: 20 })] }),
+          new Paragraph({}),
+          ...entries.map((e) => new Paragraph({
+            spacing: { after: 120 },
+            children: [
+              new TextRun({ text: `${e.time} ${e.source}  `, color: "888888", size: 16 }),
+              new TextRun({ text: e.text }),
+            ],
+          })),
+        ],
+      }],
+    });
+    downloadBlob(await Packer.toBlob(doc), `mojiokoshi_${today()}.docx`);
+  } catch (err) {
+    alert("Wordファイルを作れませんでした: " + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Word";
+  }
+};
+
+// PDF: 印刷画面を開く →「送信先」で「PDFに保存」を選ぶ（日本語もきれいに出せる）
+$("pdf").onclick = () => {
+  if (!hasEntries()) return;
+  const area = $("printArea");
+  const h1 = document.createElement("h1");
+  h1.textContent = "文字起こし";
+  const date = document.createElement("div");
+  date.className = "date";
+  date.textContent = today();
+  area.replaceChildren(h1, date, ...entries.map((e) => {
+    const para = document.createElement("p");
+    const meta = document.createElement("span");
+    meta.className = "meta";
+    meta.textContent = `${e.time} ${e.source}`;
+    para.append(meta, document.createTextNode(e.text));
+    return para;
+  }));
+  const oldTitle = document.title;
+  document.title = `mojiokoshi_${today()}`;  // PDFのファイル名になる
+  window.print();
+  document.title = oldTitle;
 };
 $("clear").onclick = () => {
   if (confirm("文字起こし結果を全部消しますか？")) { entries = []; persist(); render(); }
@@ -206,6 +306,7 @@ function stopMeter() {
 }
 
 function startRec() {
+  showError("");
   recog = new SR();
   recog.lang = "ja-JP";
   recog.continuous = true;
@@ -220,16 +321,19 @@ function startRec() {
     setLive(interim);
     onInterim(interim);
   };
+  recog.onstart = () => { $("status").textContent = "聞き取り中…（話すと文字になります）"; };
+  recog.onspeechstart = () => { $("status").textContent = "声を認識しています…"; };
   recog.onerror = (ev) => {
-    if (ev.error === "not-allowed" || ev.error === "service-not-allowed") {
-      alert("マイクが許可されていません。ブラウザのアドレスバーのマイクのアイコンから許可してください。");
-      stopRec();
-    } else if (ev.error === "audio-capture") {
-      $("status").textContent = "マイクが見つかりません。スマホをマイクにする場合は下のQRコードを使ってください。";
-      stopRec();
-    } else if (ev.error !== "no-speech" && ev.error !== "aborted") {
-      $("status").textContent = "エラー: " + ev.error;
-    }
+    if (ev.error === "no-speech" || ev.error === "aborted") return;
+    const messages = {
+      "not-allowed": "マイクが許可されていません。アドレスバー左のアイコン →「マイク」を「許可」にして、ページを再読み込みしてください。",
+      "service-not-allowed": "このブラウザでは音声認識が使えません。PCは Google Chrome で開いてください。",
+      "audio-capture": "マイクが見つかりません。マイクをつなぐか、下のQRコードでスマホをマイクにしてください。",
+      "network": "音声認識のサーバーにつながりません。ネット接続を確認してください。Chrome 以外（Brave など）では使えないことがあります。",
+      "language-not-supported": "このブラウザは日本語の音声認識に対応していません。Google Chrome で開いてください。",
+    };
+    showError(messages[ev.error] || "音声認識エラー: " + ev.error);
+    stopRec();
   };
   // 無音が続くとブラウザが勝手に止めるので、録音中なら自動で再開する
   if (isMobile) {
@@ -242,8 +346,12 @@ function startRec() {
   startMeter();
   $("rec").textContent = "■ 停止";
   $("rec").classList.add("on");
-  $("status").textContent = "聞き取り中…（話すと文字になります）";
+  $("status").textContent = "マイクを準備中…";
   navigator.wakeLock?.request("screen").then((l) => (wakeLock = l)).catch(() => {});
+}
+function showError(msg) {
+  $("error").textContent = "⚠ " + msg;
+  $("error").hidden = !msg;
 }
 function stopRec() {
   recording = false;
