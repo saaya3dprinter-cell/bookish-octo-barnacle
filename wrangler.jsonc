@@ -1,10 +1,19 @@
 {
-  // Cloudflare Workers の設定。docs/ の中身をそのままサイトとして公開する
+  // Cloudflare Workers の設定
+  // - docs/ の中身をサイトとして公開
+  // - /api/* は src/worker.js が処理（AI で文字起こし）
   "name": "bookish-octo-barnacle",
+  "main": "src/worker.js",
   "compatibility_date": "2025-09-01",
   // workers.dev のURLで公開する
   "workers_dev": true,
   "assets": {
-    "directory": "./docs"
+    "directory": "./docs",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
+  // Cloudflare の AI（Whisper）を使う。無料プランなら無料分を超えても課金されずエラーになるだけ
+  "ai": {
+    "binding": "AI"
   }
 }

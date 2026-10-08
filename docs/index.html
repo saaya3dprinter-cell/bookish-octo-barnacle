@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
 <title>音声文字起こし</title>
 <style>
   :root { --bg:#fff7f0; --fg:#222; --accent:#ff7a1a; --card:#fff; --muted:#888; --line:#f0e6dd; }
@@ -73,7 +74,7 @@
   <h1>🎙 音声文字起こし</h1>
   <div class="sub" id="where"></div>
   <div class="warn" id="unsupported" hidden>
-    このブラウザは音声認識に対応していません。PCは <b>Chrome / Edge</b>、iPhoneは <b>Safari</b>、Androidは <b>Chrome</b> で開いてください。
+    このブラウザには「ブラウザ（簡易）」の音声認識がありません。「AI（高精度）」を使ってください。
   </div>
 
   <div class="card">
@@ -97,6 +98,13 @@
 
   <div class="controls">
     <button id="rec">● 録音開始</button>
+    <div class="meterRow" style="margin-top:8px">
+      <label for="engine">文字にする方法</label>
+      <select id="engine" style="font:inherit;padding:4px 8px;border-radius:8px;border:1px solid #ccc;background:var(--card);color:var(--fg)">
+        <option value="ai">AI（高精度・おすすめ）</option>
+        <option value="browser">ブラウザ（簡易・Chromeのみ）</option>
+      </select>
+    </div>
     <div class="meterRow"><span>🎤</span><div class="meter"><div id="level"></div></div><span id="levelText">停止中</span></div>
     <div id="status"></div>
     <div id="error" hidden></div>
@@ -430,65 +438,213 @@ $("clear").onclick = () => {
   if (confirm(`「${cur().name}」の中身を全部消しますか？`)) { entries.length = 0; persist(); renderAll(); }
 };
 
-// ---------------------------------------------------------- 音声認識（ブラウザ標準の機能・無料）
+// ---------------------------------------------------------- 録音の共通部分
+// 文字にする方法は2つ
+//   ai      : 録音した声を Cloudflare の AI（Whisper）に送る。高精度・どのブラウザでもOK・スマホで音が鳴らない
+//   browser : ブラウザ標準の音声認識（Chrome など）。AI の無料分を使い切った日の予備
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-let recog = null, recording = false, wakeLock = null;
+const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+let recording = false, wakeLock = null;
 let onFinal = (text) => addEntry("PC", text);
 let onInterim = () => {};
+let engine = "ai";
+try { engine = localStorage.getItem("mojiokoshi-engine") || "ai"; } catch (_) {}
+if (engine === "browser" && !SR) engine = "ai";
+$("engine").value = engine;
+$("engine").onchange = () => {
+  const wasRecording = recording;
+  if (wasRecording) stopRec();
+  engine = $("engine").value;
+  try { localStorage.setItem("mojiokoshi-engine", engine); } catch (_) {}
+  if (engine === "browser" && !SR) $("unsupported").hidden = false;
+  if (wasRecording) startRec();
+};
 
-if (!SR) {
-  $("unsupported").hidden = false;
-  $("rec").disabled = true;
-}
-
-// ---------------------------------------------------------- 音のバー
-// スマホは音声認識とマイク計測を同時に使うと止まることがあるので、
-// 「音を検知した/していない」の表示だけにする
-const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-let meter = null;
 function setLevelText(t) { $("levelText").textContent = t; }
-
-async function startMeter() {
-  if (isMobile) { setLevelText("待機中"); return; }
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const analyser = ctx.createAnalyser();
-    analyser.fftSize = 1024;
-    ctx.createMediaStreamSource(stream).connect(analyser);
-    const buf = new Float32Array(analyser.fftSize);
-    meter = { stream, ctx, raf: 0, level: 0, quietSince: performance.now() };
-    const tick = () => {
-      analyser.getFloatTimeDomainData(buf);
-      let sum = 0;
-      for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
-      const rms = Math.sqrt(sum / buf.length);
-      meter.level = meter.level * 0.9 + rms * 0.1;  // なめらかに動くように平均をとる
-      $("level").style.width = Math.min(100, meter.level * 900) + "%";
-      const now = performance.now();
-      if (rms > 0.02) { meter.quietSince = now; setLevelText("音が入っています"); }
-      else if (now - meter.quietSince > 3000) setLevelText("音が聞こえません");
-      meter.raf = requestAnimationFrame(tick);
-    };
-    tick();
-  } catch (_) {
-    setLevelText("バー表示できません");
-  }
+function showError(msg) {
+  $("error").textContent = "⚠ " + msg;
+  $("error").hidden = !msg;
 }
-function stopMeter() {
-  if (meter) {
-    cancelAnimationFrame(meter.raf);
-    meter.stream.getTracks().forEach((t) => t.stop());
-    meter.ctx.close();
-    meter = null;
-  }
+function startRec() {
+  showError("");
+  recording = true;
+  $("rec").textContent = "■ 停止";
+  $("rec").classList.add("on");
+  $("status").textContent = "マイクを準備中…";
+  navigator.wakeLock?.request("screen").then((l) => (wakeLock = l)).catch(() => {});
+  if (engine === "ai") startAi(); else startBrowser();
+}
+function stopRec() {
+  recording = false;
+  stopAi();
+  stopBrowser();
+  $("rec").textContent = "● 録音開始";
+  $("rec").classList.remove("on");
+  if (!aiPending) setLive("");
+  $("status").textContent = "";
+  onInterim("");
+  wakeLock?.release?.(); wakeLock = null;
   $("level").classList.remove("heard");
   $("level").style.width = "0";
   setLevelText("停止中");
 }
+$("rec").onclick = () => (recording ? stopRec() : startRec());
 
-function startRec() {
-  showError("");
+// AI が使えないとき（無料分を使い切った日など）はブラウザの音声認識に切り替える
+function fallbackToBrowser(reason) {
+  const wasRecording = recording;
+  if (wasRecording) stopRec();
+  if (!SR) {
+    showError(reason + " このブラウザには予備の音声認識もないため、明日また使えるようになるまでお待ちください。");
+    return;
+  }
+  engine = "browser";
+  $("engine").value = "browser";
+  showError(reason + " ブラウザの音声認識（簡易）に切り替えました。");
+  if (wasRecording) { startRec(); showError(reason + " ブラウザの音声認識（簡易）に切り替えました。"); }
+}
+
+// ---------------------------------------------------------- AI（Whisper）で文字起こし
+// 声を録音して、話の切れ目（無音）で区切って、WAVにしてサーバーへ送る
+const TARGET_RATE = 16000;
+const SILENCE_RMS = 0.012;   // これより小さい音は「無音」扱い
+const MIN_SEC = 2.5;         // 最低この長さたまったら、無音で区切る
+const MAX_SEC = 15;          // 話し続けてもこの長さで区切る
+const SILENCE_SEC = 0.7;     // この長さ無音が続いたら区切る
+
+let ai = null;          // 録音中の音声まわり
+let aiQueue = Promise.resolve();
+let aiPending = 0;
+
+async function startAi() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    showError("このブラウザではマイクが使えません。");
+    stopRec();
+    return;
+  }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 },
+    });
+  } catch (e) {
+    showError(e.name === "NotFoundError"
+      ? "マイクが見つかりません。マイクをつなぐか、下のQRコードでスマホをマイクにしてください。"
+      : "マイクが許可されていません。アドレスバー左のアイコン →「マイク」を「許可」にして、ページを再読み込みしてください。");
+    stopRec();
+    return;
+  }
+  if (!recording) { stream.getTracks().forEach((t) => t.stop()); return; }
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  await ctx.resume();
+  const src = ctx.createMediaStreamSource(stream);
+  const proc = ctx.createScriptProcessor(4096, 1, 1);
+  ai = { stream, ctx, src, proc, chunks: [], samples: 0, silence: 0, hadSpeech: false, level: 0, quietSince: performance.now() };
+  proc.onaudioprocess = (e) => onAiAudio(e.inputBuffer.getChannelData(0));
+  src.connect(proc);
+  proc.connect(ctx.destination);
+  $("status").textContent = "聞き取り中…（ひと区切り話すと文字になります）";
+}
+function stopAi() {
+  if (!ai) return;
+  flushAi();
+  ai.proc.disconnect();
+  ai.src.disconnect();
+  ai.stream.getTracks().forEach((t) => t.stop());
+  ai.ctx.close();
+  ai = null;
+}
+function onAiAudio(data) {
+  if (!ai) return;
+  const block = new Float32Array(data);
+  let sum = 0;
+  for (let i = 0; i < block.length; i++) sum += block[i] * block[i];
+  const rms = Math.sqrt(sum / block.length);
+
+  // 音のバー
+  ai.level = ai.level * 0.6 + rms * 0.4;
+  $("level").style.width = Math.min(100, ai.level * 900) + "%";
+  const now = performance.now();
+  if (rms > SILENCE_RMS) { ai.quietSince = now; setLevelText("音が入っています"); }
+  else if (now - ai.quietSince > 3000) setLevelText("音が聞こえません");
+
+  // 話の切れ目で区切る
+  ai.chunks.push(block);
+  ai.samples += block.length;
+  if (rms > SILENCE_RMS) { ai.hadSpeech = true; ai.silence = 0; } else { ai.silence += block.length / ai.ctx.sampleRate; }
+  const sec = ai.samples / ai.ctx.sampleRate;
+  if ((sec >= MIN_SEC && ai.silence >= SILENCE_SEC) || sec >= MAX_SEC) flushAi();
+}
+function flushAi() {
+  if (!ai || !ai.samples) return;
+  const all = new Float32Array(ai.samples);
+  let off = 0;
+  for (const c of ai.chunks) { all.set(c, off); off += c.length; }
+  const speech = ai.hadSpeech;
+  const rate = ai.ctx.sampleRate;
+  ai.chunks = []; ai.samples = 0; ai.silence = 0; ai.hadSpeech = false;
+  if (!speech) return; // 無音だけなら送らない
+  sendToAi(encodeWav(downsample(all, rate, TARGET_RATE), TARGET_RATE));
+}
+function sendToAi(wav) {
+  aiPending++;
+  showPending();
+  // 順番が入れ替わらないように1つずつ送る
+  aiQueue = aiQueue.then(async () => {
+    try {
+      const res = await fetch("/api/transcribe", { method: "POST", body: wav, headers: { "Content-Type": "audio/wav" } });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        if (data.text) onFinal(data.text);
+      } else if (data.error === "quota") {
+        fallbackToBrowser("今日のAIの無料分を使い切りました（料金はかかりません。明日また使えます）。");
+      } else if (res.status === 404 || res.status === 405) {
+        fallbackToBrowser("AIの文字起こしがまだ準備できていません。");
+      } else {
+        showError("AIの文字起こしでエラーが起きました: " + (data.message || res.status));
+      }
+    } catch (_) {
+      showError("サーバーにつながりません。ネット接続を確認してください。");
+    } finally {
+      aiPending--;
+      showPending();
+    }
+  });
+}
+function showPending() {
+  const t = aiPending ? "✍ 文字にしています…" : "";
+  setLive(t);
+  onInterim(t);
+}
+function downsample(buf, from, to) {
+  if (from === to) return buf;
+  const ratio = from / to, out = new Float32Array(Math.floor(buf.length / ratio));
+  for (let i = 0; i < out.length; i++) {
+    const st = Math.floor(i * ratio), en = Math.min(buf.length, Math.floor((i + 1) * ratio));
+    let sum = 0;
+    for (let j = st; j < en; j++) sum += buf[j];
+    out[i] = sum / Math.max(1, en - st);
+  }
+  return out;
+}
+function encodeWav(pcm, rate) {
+  const buf = new ArrayBuffer(44 + pcm.length * 2), v = new DataView(buf);
+  const str = (o, t) => { for (let i = 0; i < t.length; i++) v.setUint8(o + i, t.charCodeAt(i)); };
+  str(0, "RIFF"); v.setUint32(4, 36 + pcm.length * 2, true); str(8, "WAVE");
+  str(12, "fmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  str(36, "data"); v.setUint32(40, pcm.length * 2, true);
+  for (let i = 0; i < pcm.length; i++) {
+    const x = Math.max(-1, Math.min(1, pcm[i]));
+    v.setInt16(44 + i * 2, x < 0 ? x * 0x8000 : x * 0x7fff, true);
+  }
+  return new Blob([buf], { type: "audio/wav" });
+}
+
+// ---------------------------------------------------------- ブラウザ標準の音声認識（予備）
+let recog = null, meter = null;
+function startBrowser() {
+  if (!SR) { $("unsupported").hidden = false; stopRec(); return; }
   recog = new SR();
   recog.lang = "ja-JP";
   recog.continuous = true;
@@ -511,42 +667,62 @@ function startRec() {
       "not-allowed": "マイクが許可されていません。アドレスバー左のアイコン →「マイク」を「許可」にして、ページを再読み込みしてください。",
       "service-not-allowed": "このブラウザでは音声認識が使えません。PCは Google Chrome で開いてください。",
       "audio-capture": "マイクが見つかりません。マイクをつなぐか、下のQRコードでスマホをマイクにしてください。",
-      "network": "音声認識のサーバーにつながりません。ネット接続を確認してください。Chrome 以外（Brave など）では使えないことがあります。",
+      "network": "音声認識のサーバーにつながりません。ネット接続を確認してください。",
       "language-not-supported": "このブラウザは日本語の音声認識に対応していません。Google Chrome で開いてください。",
     };
     showError(messages[ev.error] || "音声認識エラー: " + ev.error);
     stopRec();
   };
-  // 無音が続くとブラウザが勝手に止めるので、録音中なら自動で再開する
   if (isMobile) {
     recog.onsoundstart = () => { $("level").classList.add("heard"); setLevelText("音が入っています"); };
     recog.onsoundend = () => { $("level").classList.remove("heard"); setLevelText("待機中"); };
   }
-  recog.onend = () => { if (recording) setTimeout(() => { try { recog.start(); } catch (_) {} }, 250); };
+  // 無音が続くとブラウザが勝手に止めるので、録音中なら自動で再開する
+  recog.onend = () => { if (recording && engine === "browser") setTimeout(() => { try { recog.start(); } catch (_) {} }, 250); };
   recog.start();
-  recording = true;
   startMeter();
-  $("rec").textContent = "■ 停止";
-  $("rec").classList.add("on");
-  $("status").textContent = "マイクを準備中…";
-  navigator.wakeLock?.request("screen").then((l) => (wakeLock = l)).catch(() => {});
 }
-function showError(msg) {
-  $("error").textContent = "⚠ " + msg;
-  $("error").hidden = !msg;
-}
-function stopRec() {
-  recording = false;
-  try { recog?.stop(); } catch (_) {}
-  $("rec").textContent = "● 録音開始";
-  $("rec").classList.remove("on");
-  setLive("");
-  $("status").textContent = "";
-  onInterim("");
-  wakeLock?.release?.(); wakeLock = null;
+function stopBrowser() {
+  if (recog) { try { recog.stop(); } catch (_) {} recog = null; }
   stopMeter();
 }
-$("rec").onclick = () => (recording ? stopRec() : startRec());
+// 音のバー（スマホは音声認識とマイク計測を同時に使うと止まることがあるので、PCだけ）
+async function startMeter() {
+  if (isMobile) { setLevelText("待機中"); return; }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    if (!recording) { stream.getTracks().forEach((t) => t.stop()); return; }
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 1024;
+    ctx.createMediaStreamSource(stream).connect(analyser);
+    const buf = new Float32Array(analyser.fftSize);
+    meter = { stream, ctx, raf: 0, level: 0, quietSince: performance.now() };
+    const tick = () => {
+      if (!meter) return;
+      analyser.getFloatTimeDomainData(buf);
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+      const rms = Math.sqrt(sum / buf.length);
+      meter.level = meter.level * 0.9 + rms * 0.1;
+      $("level").style.width = Math.min(100, meter.level * 900) + "%";
+      const now = performance.now();
+      if (rms > 0.02) { meter.quietSince = now; setLevelText("音が入っています"); }
+      else if (now - meter.quietSince > 3000) setLevelText("音が聞こえません");
+      meter.raf = requestAnimationFrame(tick);
+    };
+    tick();
+  } catch (_) {
+    setLevelText("バー表示できません");
+  }
+}
+function stopMeter() {
+  if (!meter) return;
+  cancelAnimationFrame(meter.raf);
+  meter.stream.getTracks().forEach((t) => t.stop());
+  meter.ctx.close();
+  meter = null;
+}
 
 // ---------------------------------------------------------- スマホ ⇔ PC 接続（WebRTC / PeerJS）
 const PREFIX = "saaya-transcribe-";
