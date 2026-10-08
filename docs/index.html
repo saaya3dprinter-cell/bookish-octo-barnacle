@@ -348,9 +348,9 @@ function assignSpeakers(a, words) {
 function cycleSpeaker(e, a) {
   const doc = cur();
   const same = a ? doc.entries.filter((x) => offsetIn(a, x.time) !== null) : doc.entries;
-  const keys = [...new Set(same.map((x) => x.speaker).filter(Boolean))].sort();
-  const extra = String.fromCharCode(65 + keys.length);  // 新しい人も選べるように
-  const options = [...keys, extra];
+  // A から「ほかの行で使っている一番後ろの記号の次」まで（例: ほかが A と B なら A→B→C→A）
+  const max = Math.max(65, ...same.filter((x) => x !== e).map((x) => x.speaker).filter(Boolean).map((k) => k.charCodeAt(0)));
+  const options = Array.from({ length: Math.min(max - 65 + 2, 26) }, (_, i) => String.fromCharCode(65 + i));
   const next = options[(options.indexOf(e.speaker) + 1) % options.length];
   e.speaker = next;
   const name = same.find((x) => x !== e && x.speaker === next && x.speakerName)?.speakerName;
