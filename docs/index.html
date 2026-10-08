@@ -6,173 +6,221 @@
 <meta name="robots" content="noindex, nofollow">
 <title>音声文字起こし</title>
 <style>
-  :root { --bg:#fff7f0; --fg:#222; --accent:#ff7a1a; --card:#fff; --muted:#888; --line:#f0e6dd; }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg:#1b1714; --fg:#eee; --card:#26211d; --muted:#aaa; --line:#3a322c; }
+  :root {
+    --bg:#fff7f0; --fg:#222; --muted:#7a7068; --card:#fff; --line:#efe3d8; --accent:#ff7a1a; --accent-soft:#fff0e3;
+    --rec:#e5484d; --ok:#2bb673; --shadow:0 1px 3px rgba(0,0,0,.08); --tap: rgba(0,0,0,.05);
   }
-  * { box-sizing: border-box; }
-  body { margin:0; font-family: system-ui, -apple-system, "Hiragino Sans", "Yu Gothic UI", sans-serif;
-         background:var(--bg); color:var(--fg); }
-  main { max-width: 760px; margin: 0 auto; padding: 16px; }
-  h1 { font-size: 1.3rem; margin: 8px 0 4px; }
-  .sub { color: var(--muted); font-size: .9rem; margin-bottom: 12px; }
-  .card { background:var(--card); border-radius:14px; padding:16px; margin-bottom:14px;
-          box-shadow: 0 1px 4px rgba(0,0,0,.08); }
-  #rec { width:100%; padding:22px; font-size:1.3rem; font-weight:700; border:0; border-radius:14px;
-         background:var(--accent); color:#fff; cursor:pointer; }
-  #rec.on { background:#d62f2f; }
-  #rec:disabled { opacity:.5; }
-  #transcript { min-height:45vh; max-height:62vh; overflow-y:auto; font-size:1.35rem; line-height:1.8;
-                margin-top:10px; padding-right:4px; }
-  #transcript p { margin:0 0 10px; }
-  #transcript .meta { font-size:.7rem; color:var(--muted); margin-right:6px; vertical-align:middle; }
-  #live { color:var(--muted); }
-  #live:empty::before { content: attr(data-hint); font-size:1rem; }
-  .controls { position:sticky; bottom:0; padding:10px 0 14px; background:var(--bg); }
-  .meterRow { display:flex; align-items:center; gap:8px; margin-top:10px; font-size:.85rem; color:var(--muted); }
-  .meter { flex:1; height:12px; background:var(--line); border-radius:6px; overflow:hidden; }
-  #level { height:100%; width:0; background:#2bb673; border-radius:6px; transition: width .2s ease-out; }
-  #level.heard { width:100%; opacity:.45; }
-  .docBar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:10px; }
-  .docBar input, .docBar select, #library select { font:inherit; padding:7px 10px; border-radius:8px;
-         border:1px solid #ccc; background:var(--card); color:var(--fg); }
-  #docName { flex:1; min-width:180px; font-weight:700; }
-  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); font-weight:700; }
-  .bigBtn { width:100%; padding:16px; font-size:1.15rem; font-weight:700; border:0; border-radius:12px;
-            background:var(--accent); color:#fff; cursor:pointer; margin-bottom:12px; }
-  .tabs { display:flex; gap:6px; flex-wrap:wrap; }
-  .tab { padding:7px 12px; border-radius:999px; border:1px solid #ccc; background:var(--card); color:var(--fg); cursor:pointer; font:inherit; font-size:.9rem; }
-  .tab.on { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:700; }
-  body.relay .docItem select, body.relay .docItem .small, body.relay #homeFolderBar .small,
-  body.relay #folderTabs > button.small { display:none; }
-  #recBadge { color:#d62f2f; border-color:#d62f2f; font-weight:700; }
-  #toast { position:fixed; left:50%; bottom:24px; transform:translateX(-50%); background:#222; color:#fff;
-           padding:10px 16px; border-radius:10px; font-size:.95rem; z-index:10; }
-  #audioList { margin-top:8px; }
-  .audioItem { display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:.85rem; color:var(--muted); margin:4px 0; }
-  .audioItem audio { height:36px; flex:1; min-width:220px; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#1b1714; --fg:#eee; --muted:#a99f97; --card:#26211d; --line:#3a322c; --accent-soft:#3a2617; --tap: rgba(255,255,255,.06); }
+  }
+  * { box-sizing:border-box; }
+  html { -webkit-text-size-adjust:100%; }
+  body { margin:0; font-family:system-ui, -apple-system, "Hiragino Sans", "Yu Gothic UI", sans-serif; background:var(--bg); color:var(--fg); }
+  button { font:inherit; color:inherit; }
+  .app { max-width:760px; margin:0 auto; min-height:100vh; }
+
+  /* ---- 上のバー */
+  .appbar { position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:6px; padding:8px 10px;
+            background:var(--bg); border-bottom:1px solid var(--line); }
+  .appbar h1 { font-size:1.15rem; margin:0 0 0 6px; flex:1; }
+  .iconbtn { border:0; background:none; padding:8px 10px; border-radius:10px; cursor:pointer; font-size:1rem; white-space:nowrap; }
+  .iconbtn:hover { background:var(--tap); }
+  .iconbtn.big { font-size:1.3rem; line-height:1; padding:6px 10px; }
+  #docName { flex:1; min-width:0; font:inherit; font-size:1.05rem; font-weight:700; color:var(--fg); background:transparent;
+             border:1px solid transparent; border-radius:8px; padding:7px 8px; }
+  #docName:hover { border-color:var(--line); }
+  #docName:focus { outline:none; border-color:var(--accent); background:var(--card); }
+  .savebtn { border:0; border-radius:999px; padding:8px 16px; font-weight:700; cursor:pointer; background:var(--accent); color:#fff; white-space:nowrap; }
+  .savebtn.saved { background:var(--line); color:var(--muted); }
+  .savebtn:disabled { opacity:.6; }
+  .subbar { display:flex; align-items:center; gap:4px 10px; flex-wrap:wrap; padding:6px 16px; font-size:.85rem; color:var(--muted); }
+  .subbar select { font:inherit; color:var(--fg); background:var(--card); border:1px solid var(--line); border-radius:999px; padding:4px 10px; }
+  #saveState.unsaved { color:var(--accent); font-weight:700; }
+  .content { padding:8px 16px 170px; }
+  .account { display:flex; align-items:center; gap:6px; font-size:.85rem; color:var(--muted); }
+  .pill { border:1px solid var(--line); background:var(--card); border-radius:999px; padding:7px 14px; cursor:pointer; white-space:nowrap; }
+  .pill.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:700; }
+  .notice { margin:8px 16px 0; background:#fff1c2; color:#5a4500; padding:10px 12px; border-radius:10px; font-size:.9rem; }
+  .notice button { margin-left:8px; }
+
+  /* ---- 文字起こし */
+  #transcript { font-size:1.2rem; line-height:1.85; }
+  #transcript p { margin:0; padding:8px 8px; border-radius:10px; }
+  #transcript p + p { border-top:1px solid var(--line); }
   #transcript p.seek { cursor:pointer; }
-  .tag.speaker { cursor:pointer; font-weight:700; font-size:.8rem; }
+  #transcript p.seek:hover { background:var(--accent-soft); }
+  #transcript .meta { display:inline-flex; align-items:center; gap:6px; margin-right:8px; vertical-align:2px; font-size:.7rem; color:var(--muted); }
+  #transcript p.seek .meta::before { content:"▶"; font-size:.6rem; opacity:.6; }
+  #live { color:var(--muted); padding:8px; margin:0; }
+  #done:empty + #live:empty::before { content:attr(data-hint); display:block; text-align:center; padding:48px 12px; font-size:1rem; line-height:1.7; }
+  .tag { display:inline-block; padding:1px 8px; border-radius:999px; background:#ffe3cc; color:#222; font-size:.75rem; }
+  .tag.phone { background:#d8ecff; }
+  .tag.speaker { font-weight:700; font-size:.8rem; }
   .tag.pick { cursor:pointer; }
   .tag.pick:hover { outline:2px solid var(--accent); }
-  #speakerMenu { position:fixed; z-index:20; min-width:200px; max-width:calc(100vw - 16px); background:var(--card); color:var(--fg);
-                 border-radius:12px; box-shadow:0 6px 24px rgba(0,0,0,.2); padding:6px; font-size:.95rem; }
-  #speakerMenu .menuTitle { font-size:.75rem; color:var(--muted); padding:4px 10px; }
-  #speakerMenu .menuItem { display:flex; align-items:center; gap:8px; width:100%; padding:10px; border:0; background:none;
-                 color:var(--fg); font:inherit; text-align:left; border-radius:8px; cursor:pointer; }
-  #speakerMenu .menuItem:hover, #speakerMenu .menuItem.current { background:rgba(255,122,26,.12); }
-  #speakerMenu .dot { width:14px; height:14px; border-radius:50%; flex:none; border:1px solid rgba(0,0,0,.15); }
-  #speakerMenu .check { margin-left:auto; color:var(--accent); font-weight:700; }
-  #speakerMenu hr { border:0; border-top:1px solid var(--line); margin:4px 0; }
-  #transcript p.seek:hover { background:rgba(255,122,26,.08); border-radius:6px; }
-  #transcript p.seek .meta::before { content:"▶ "; }
-  .folder { margin-top:14px; }
-  .folderHead { display:flex; align-items:center; gap:6px; font-weight:700; padding:6px 0; border-bottom:1px solid var(--line); }
-  .folderHead .name { flex:1; }
-  .docItem { display:flex; align-items:center; gap:6px; padding:8px 4px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
-  .docItem.current { background:rgba(255,122,26,.12); border-radius:8px; }
-  .docItem .open { flex:1; min-width:160px; text-align:left; background:none; border:0; color:var(--fg); cursor:pointer; font:inherit; padding:0; }
-  .docItem .info { font-size:.75rem; color:var(--muted); }
-  .empty { color:var(--muted); font-size:.85rem; padding:6px 0; }
-  #error { background:#ffe1e1; color:#8a1010; padding:10px 12px; border-radius:10px; margin-top:8px; font-size:.95rem; }
+
+  /* ---- 録音データ */
+  #audioList:not(:empty) { margin:4px 0 10px; display:grid; gap:6px; }
+  .audioItem { display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:.85rem; color:var(--muted);
+               background:var(--card); border-radius:12px; padding:8px 10px; box-shadow:var(--shadow); }
+  .audioItem audio { height:36px; flex:1; min-width:200px; }
+  .audioItem .small, .small { padding:5px 12px; border-radius:999px; border:1px solid var(--line); background:var(--card); cursor:pointer; font-size:.85rem; }
+
+  /* ---- 下の録音バー */
+  .recbar { position:fixed; left:0; right:0; bottom:0; z-index:6; background:var(--card); box-shadow:0 -2px 12px rgba(0,0,0,.08);
+            padding:10px 16px calc(12px + env(safe-area-inset-bottom)); }
+  .recbar .inner { max-width:728px; margin:0 auto; }
+  .recrow { display:flex; align-items:center; gap:10px; }
+  #rec { flex:1; height:58px; border:0; border-radius:999px; font-size:1.15rem; font-weight:700; cursor:pointer;
+         background:var(--rec); color:#fff; box-shadow:0 4px 14px rgba(229,72,77,.35); }
+  #rec.on { background:#222; box-shadow:none; }
+  @media (prefers-color-scheme: dark) { #rec.on { background:#555; } }
+  #rec:disabled { opacity:.5; }
+  #pairBtn { height:58px; }
+  .meterRow { display:flex; align-items:center; gap:8px; margin-bottom:8px; font-size:.8rem; color:var(--muted); }
+  .meter { flex:1; height:8px; background:var(--line); border-radius:4px; overflow:hidden; }
+  #level { height:100%; width:0; background:var(--ok); border-radius:4px; transition:width .2s ease-out; }
+  #level.heard { width:100%; opacity:.45; }
+  #status { font-size:.8rem; color:var(--muted); margin-top:6px; text-align:center; }
+  #status:empty { display:none; }
+  #error { background:#ffe1e1; color:#8a1010; padding:8px 12px; border-radius:10px; margin-top:8px; font-size:.9rem; }
+
+  /* ---- ホーム */
+  .tabs { display:flex; gap:6px; overflow-x:auto; padding:4px 0 8px; scrollbar-width:none; }
+  .tab { flex:none; padding:7px 14px; border-radius:999px; border:1px solid var(--line); background:var(--card); cursor:pointer; font-size:.9rem; }
+  .tab.on { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:700; }
+  #homeFolderBar:not(:empty) { display:flex; align-items:center; justify-content:space-between; gap:8px; margin:4px 0 8px; }
+  .docCard { display:flex; align-items:center; gap:8px; background:var(--card); border-radius:14px; padding:14px 10px 14px 16px;
+             margin-bottom:8px; box-shadow:var(--shadow); cursor:pointer; }
+  .docCard:hover { outline:2px solid var(--accent-soft); }
+  .docCard.current { outline:2px solid var(--accent); }
+  .docCard .body { flex:1; min-width:0; }
+  .docCard .name { font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .docCard .info { font-size:.78rem; color:var(--muted); margin-top:2px; }
+  .docCard .preview { font-size:.85rem; color:var(--muted); margin-top:4px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .empty { color:var(--muted); text-align:center; padding:48px 12px; line-height:1.7; }
+  .fab { position:fixed; left:50%; transform:translateX(-50%); bottom:calc(20px + env(safe-area-inset-bottom)); z-index:6;
+         border:0; border-radius:999px; padding:16px 28px; font-size:1.1rem; font-weight:700; cursor:pointer;
+         background:var(--rec); color:#fff; box-shadow:0 6px 18px rgba(229,72,77,.4); white-space:nowrap; }
+  .recBadge { background:var(--rec); color:#fff; border:0; border-radius:999px; padding:6px 12px; font-weight:700; cursor:pointer; }
+  body.relay .docCard .iconbtn, body.relay #folderTabs > .addFolder, body.relay #homeFolderBar .iconbtn { display:none; }
+
+  /* ---- メニュー（⋯ や 話者の印を押したとき） */
+  .popmenu { position:fixed; z-index:20; min-width:220px; max-width:calc(100vw - 16px); max-height:70vh; overflow:auto; background:var(--card);
+             border-radius:14px; box-shadow:0 8px 28px rgba(0,0,0,.22); padding:6px; font-size:.95rem; }
+  .popmenu .menuTitle { font-size:.75rem; color:var(--muted); padding:6px 10px 2px; }
+  .popmenu .menuItem { display:flex; align-items:center; gap:10px; width:100%; padding:11px 10px; border:0; background:none;
+             text-align:left; border-radius:8px; cursor:pointer; }
+  .popmenu .menuItem:hover, .popmenu .menuItem.current { background:var(--accent-soft); }
+  .popmenu .menuItem.danger { color:#c62828; }
+  .popmenu .dot { width:14px; height:14px; border-radius:50%; flex:none; border:1px solid rgba(0,0,0,.15); }
+  .popmenu .check { margin-left:auto; color:var(--accent); font-weight:700; }
+  .popmenu hr { border:0; border-top:1px solid var(--line); margin:4px 0; }
+
+  /* ---- スマホをマイクにする（QRコード） */
+  .modal { position:fixed; inset:0; z-index:30; background:rgba(0,0,0,.45); display:flex; align-items:flex-end; justify-content:center; }
+  .modal[hidden] { display:none; }
+  .sheet { background:var(--card); width:100%; max-width:480px; border-radius:18px 18px 0 0; padding:18px 18px calc(18px + env(safe-area-inset-bottom)); text-align:center; }
+  @media (min-width:600px) { .modal { align-items:center; } .sheet { border-radius:18px; } }
+  .sheet h2 { font-size:1.1rem; margin:0 0 6px; }
+  .sheet p { color:var(--muted); font-size:.9rem; margin:0 0 8px; line-height:1.6; }
+  #qr { display:flex; justify-content:center; margin:10px 0; }
+  #qr img { background:#fff; padding:8px; border-radius:10px; width:220px; height:220px; image-rendering:pixelated; }
+  #phoneLink { font-size:.75rem; word-break:break-all; color:var(--muted); }
+  #pairStatus { font-weight:700; margin:8px 0; }
+
+  #toast { position:fixed; left:50%; bottom:130px; transform:translateX(-50%); background:#222; color:#fff; z-index:40;
+           padding:10px 16px; border-radius:10px; font-size:.95rem; max-width:calc(100vw - 32px); text-align:center; }
+  .footer { text-align:center; font-size:.75rem; color:var(--muted); padding:24px 0 8px; }
+  .footer a { color:inherit; }
+
   #printArea { display:none; }
   @media print {
     body { background:#fff; color:#000; }
-    main { display:none; }
-    #printArea { display:block; font-family: "Yu Mincho", "Hiragino Mincho ProN", serif; }
+    .app, .recbar, .fab, .modal, #toast { display:none !important; }
+    #printArea { display:block; font-family:"Yu Mincho", "Hiragino Mincho ProN", serif; }
     #printArea h1 { font-size:18pt; margin:0 0 4pt; }
     #printArea .date { font-size:10pt; color:#555; margin-bottom:14pt; }
     #printArea p { font-size:11pt; line-height:1.8; margin:0 0 6pt; }
     #printArea .meta { font-size:8pt; color:#666; margin-right:6pt; }
   }
-  #status { font-size:.9rem; color:var(--muted); margin-top:6px; }
-  #qr { display:flex; justify-content:center; margin:10px 0; }
-  #qr img { background:#fff; padding:8px; border-radius:8px; width:200px; height:200px; image-rendering: pixelated; }
-  #phoneLink { font-size:.8rem; word-break: break-all; color: var(--muted); }
-  .tag { display:inline-block; padding:0 6px; border-radius:6px; background:#ffe3cc; color:#222; margin-left:4px; }
-  .tag.phone { background:#d8ecff; }
-  .row { display:flex; gap:8px; justify-content:space-between; align-items:center; flex-wrap:wrap; }
-  button.small { padding:6px 12px; border-radius:8px; border:1px solid #ccc; background:var(--card); color:var(--fg); cursor:pointer; }
-  .warn { background:#fff1c2; color:#5a4500; padding:10px 12px; border-radius:10px; margin-bottom:14px; }
 </style>
 </head>
 <body>
-<main>
-  <div class="row">
-    <div style="display:flex;align-items:center;gap:8px">
-      <button class="small" id="homeBtn">🏠 ホーム</button>
-      <h1>🎙 音声文字起こし</h1>
-      <button class="small" id="recBadge" hidden>● 録音中</button>
-    </div>
-    <div id="account" class="sub" style="margin:0" hidden>
-      <span id="accountText"></span>
-      <button class="small primary" id="login">Googleでログイン</button>
-      <button class="small" id="logout" hidden>ログアウト</button>
-    </div>
-  </div>
-  <div class="warn" id="cloudNotice" hidden></div>
-  <div class="sub" id="where"></div>
-  <div class="warn" id="unsupported" hidden>
-    このブラウザには「ブラウザ（簡易）」の音声認識がありません。「AI（高精度）」を使ってください。
-  </div>
-
+<div class="app">
+  <!-- ===== ホーム（一覧） ===== -->
   <section id="homeView" hidden>
-    <div class="card">
-      <button id="homeNew" class="bigBtn">＋ 新しく録音する</button>
+    <header class="appbar">
+      <h1>🎙 文字起こし</h1>
+      <button class="recBadge" id="recBadge" hidden>● 録音中</button>
+      <div class="account" id="account" hidden>
+        <span id="accountText"></span>
+        <button class="pill primary" id="login">Googleでログイン</button>
+        <button class="iconbtn" id="logout" hidden title="ログアウト">ログアウト</button>
+      </div>
+    </header>
+    <div class="notice" id="cloudNoticeHome" hidden></div>
+    <div class="content">
       <div class="tabs" id="folderTabs"></div>
-      <div id="homeFolderBar" class="row" style="margin:6px 0 4px"></div>
+      <div id="homeFolderBar"></div>
       <div id="homeList"></div>
+      <div class="footer"><a href="/privacy.html">プライバシーポリシー</a></div>
     </div>
+    <button id="homeNew" class="fab">● 新しく録音する</button>
   </section>
 
+  <!-- ===== 文字起こし画面 ===== -->
   <section id="editorView">
-  <div class="card">
-    <div class="docBar">
-      <input id="docName" placeholder="文字起こしの名前" aria-label="文字起こしの名前">
+    <header class="appbar">
+      <button class="iconbtn" id="homeBtn" title="一覧にもどる">‹ 一覧</button>
+      <input id="docName" placeholder="名前をつける" aria-label="文字起こしの名前">
+      <button class="savebtn" id="saveDoc">保存</button>
+      <button class="iconbtn big" id="moreBtn" title="そのほか" aria-label="そのほか">⋯</button>
+    </header>
+    <div class="subbar">
       <select id="docFolder" aria-label="入れるフォルダ"></select>
-      <button class="small primary" id="saveDoc">💾 保存</button>
-      <button class="small" id="newDoc">＋ 新規</button>
+      <span id="docInfo"></span>
+      <span id="saveState"></span>
     </div>
-    <div class="row">
-      <span class="sub" style="margin:0"><span id="docInfo"></span> <span id="saveState"></span></span>
-      <div>
-        <button class="small" id="copy">コピー</button>
-        <button class="small" id="word">Word</button>
-        <button class="small" id="pdf">PDF</button>
-        <button class="small" id="save">.txt</button>
-        <button class="small" id="clear">クリア</button>
+    <div class="notice" id="cloudNotice" hidden></div>
+    <div class="notice" id="unsupported" hidden>このブラウザには「ブラウザ（簡易）」の音声認識がありません。「AI（高精度）」を使ってください。</div>
+    <div id="where" hidden></div>
+    <div class="content">
+      <div id="audioList"></div>
+      <div id="transcript"><div id="done"></div><p id="live" data-hint="下の「● 録音」を押して話すと&#10;ここに文字が出てきます"></p></div>
+    </div>
+    <div class="recbar">
+      <div class="inner">
+        <div class="meterRow"><span>🎤</span><div class="meter"><div id="level"></div></div><span id="levelText">停止中</span></div>
+        <div class="recrow">
+          <button id="rec">● 録音</button>
+          <button class="pill" id="pairBtn" hidden>📱 スマホを<br>マイクに</button>
+        </div>
+        <div id="status"></div>
+        <div id="error" hidden></div>
       </div>
     </div>
-    <div id="audioList"></div>
-    <div id="transcript"><div id="done"></div><p id="live" data-hint="「● 録音開始」を押して話すと、ここに文字がどんどん出てきます"></p></div>
-  </div>
-
-  <div class="controls">
-    <button id="rec">● 録音開始</button>
-    <div class="meterRow" style="margin-top:8px">
-      <label for="engine">文字にする方法</label>
-      <select id="engine" style="font:inherit;padding:4px 8px;border-radius:8px;border:1px solid #ccc;background:var(--card);color:var(--fg)">
-        <option value="ai">AI（高精度・おすすめ）</option>
-        <option value="browser">ブラウザ（簡易・Chromeのみ）</option>
-      </select>
+    <!-- 使わない操作ボタン（「⋯」メニューから押す） -->
+    <div hidden>
+      <button id="newDoc"></button><button id="copy"></button><button id="word"></button>
+      <button id="pdf"></button><button id="save"></button><button id="clear"></button>
+      <select id="engine"><option value="ai">AI</option><option value="browser">ブラウザ</option></select>
     </div>
-    <div class="meterRow"><span>🎤</span><div class="meter"><div id="level"></div></div><span id="levelText">停止中</span></div>
-    <div id="status"></div>
-    <div id="error" hidden></div>
-  </div>
-
-  <div class="card" id="pairCard" hidden>
-    <strong>📱 スマホをマイクにする</strong>
-    <div class="sub" style="margin:6px 0 0">PCにマイクがないときは、スマホのカメラでこのQRコードを読み取ってください。スマホで話した内容がこの画面に出ます。</div>
-    <div id="qr"></div>
-    <div id="phoneLink"></div>
-    <div id="pairStatus" class="sub" style="margin:6px 0 0"></div>
-  </div>
   </section>
-  <div id="toast" hidden></div>
+</div>
 
-  <p class="sub" style="text-align:center;margin-top:24px"><a href="/privacy.html" style="color:inherit">プライバシーポリシー</a></p>
-</main>
+<!-- スマホをマイクにする -->
+<div class="modal" id="pairCard" hidden>
+  <div class="sheet">
+    <h2>📱 スマホをマイクにする</h2>
+    <p>スマホのカメラで読み取ると、スマホで話した内容がこのPCの画面に出ます。</p>
+    <div id="qr"></div>
+    <div id="pairStatus"></div>
+    <div id="phoneLink"></div>
+    <button class="pill" id="pairClose" style="margin-top:12px">閉じる</button>
+  </div>
+</div>
+<div id="toast" hidden></div>
 <div id="printArea"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
@@ -366,8 +414,55 @@ function setSpeaker(e, a, key) {
   render();
 }
 // 話者の印を押したときのメニュー：だれが話したかを選ぶ・名前を変える
+// ---------------------------------------------------------- 押すと出るメニュー（⋯ や 話者の印）
+// items: [{ label, onClick, color, current, danger }] または "-"（区切り線）
+function openMenu(anchor, title, items) {
+  closeMenu();
+  const menu = document.createElement("div");
+  menu.id = "popMenu";
+  menu.className = "popmenu";
+  if (title) {
+    const t = document.createElement("div");
+    t.className = "menuTitle";
+    t.textContent = title;
+    menu.append(t);
+  }
+  for (const it of items) {
+    if (it === "-") { menu.append(document.createElement("hr")); continue; }
+    const b = document.createElement("button");
+    b.className = "menuItem" + (it.current ? " current" : "") + (it.danger ? " danger" : "");
+    if (it.color) {
+      const dot = document.createElement("span");
+      dot.className = "dot";
+      dot.style.background = it.color;
+      b.append(dot);
+    }
+    b.append(document.createTextNode(it.label));
+    if (it.current) {
+      const check = document.createElement("span");
+      check.className = "check";
+      check.textContent = "✓";
+      b.append(check);
+    }
+    b.onclick = (ev) => { ev.stopPropagation(); closeMenu(); it.onClick(); };
+    menu.append(b);
+  }
+  document.body.append(menu);
+  // 押したところのすぐ下に出す（画面からはみ出さないように）
+  const r = anchor.getBoundingClientRect();
+  const w = menu.offsetWidth, h = menu.offsetHeight;
+  menu.style.left = Math.max(8, Math.min(r.left, innerWidth - w - 8)) + "px";
+  menu.style.top = (r.bottom + h + 8 < innerHeight ? r.bottom + 4 : Math.max(8, r.top - h - 4)) + "px";
+  setTimeout(() => document.addEventListener("click", closeMenu, { once: true }), 0);
+}
+function closeMenu() {
+  document.getElementById("popMenu")?.remove();
+}
+document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") closeMenu(); });
+window.addEventListener("scroll", closeMenu, true);
+
+// 話者の印を押したときのメニュー：だれが話したかを選ぶ・名前を変える
 function openSpeakerMenu(anchor, e, a) {
-  closeSpeakerMenu();
   const doc = cur();
   const same = a ? doc.entries.filter((x) => offsetIn(a, x.time) !== null) : doc.entries;
   const people = {};
@@ -376,52 +471,12 @@ function openSpeakerMenu(anchor, e, a) {
   const keys = Object.keys(people).sort();
   let next = "A";
   while (keys.includes(next) && next < "Z") next = String.fromCharCode(next.charCodeAt(0) + 1);
-
-  const menu = document.createElement("div");
-  menu.id = "speakerMenu";
-  const title = document.createElement("div");
-  title.className = "menuTitle";
-  title.textContent = "この行を話したのは";
-  menu.append(title);
-  const item = (label, color, onClick, current) => {
-    const b = document.createElement("button");
-    b.className = "menuItem" + (current ? " current" : "");
-    if (color) {
-      const dot = document.createElement("span");
-      dot.className = "dot";
-      dot.style.background = color;
-      b.append(dot);
-    }
-    b.append(document.createTextNode(label));
-    if (current) {
-      const check = document.createElement("span");
-      check.className = "check";
-      check.textContent = "✓";
-      b.append(check);
-    }
-    b.onclick = (ev) => { ev.stopPropagation(); closeSpeakerMenu(); onClick(); };
-    menu.append(b);
-  };
-  for (const k of keys) item(people[k] ? `${k}　${people[k]}` : k, speakerColor(k), () => setSpeaker(e, a, k), e.speaker === k);
-  item(`＋ 新しい人（${next}）`, null, () => setSpeaker(e, a, next));
-  if (e.speaker) {
-    const hr = document.createElement("hr");
-    menu.append(hr);
-    item(`✏ 「${speakerLabel(e)}」の名前を変える`, null, () => renameSpeaker(a, e.speaker));
-  }
-  document.body.append(menu);
-  // 押した印のすぐ下に出す（画面からはみ出さないように）
-  const r = anchor.getBoundingClientRect();
-  const w = menu.offsetWidth, h = menu.offsetHeight;
-  menu.style.left = Math.max(8, Math.min(r.left, innerWidth - w - 8)) + "px";
-  menu.style.top = (r.bottom + h + 8 < innerHeight ? r.bottom + 4 : Math.max(8, r.top - h - 4)) + "px";
-  setTimeout(() => document.addEventListener("click", closeSpeakerMenu, { once: true }), 0);
+  openMenu(anchor, "この行を話したのは", [
+    ...keys.map((k) => ({ label: people[k] ? `${k}　${people[k]}` : k, color: speakerColor(k), current: e.speaker === k, onClick: () => setSpeaker(e, a, k) })),
+    { label: `＋ 新しい人（${next}）`, onClick: () => setSpeaker(e, a, next) },
+    ...(e.speaker ? ["-", { label: `✏ 「${speakerLabel(e)}」の名前を変える`, onClick: () => renameSpeaker(a, e.speaker) }] : []),
+  ]);
 }
-function closeSpeakerMenu() {
-  document.getElementById("speakerMenu")?.remove();
-}
-document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") closeSpeakerMenu(); });
-window.addEventListener("scroll", closeSpeakerMenu, true);
 // 録音ごとに、話者の名前を付け替える
 function renameSpeaker(a, key) {
   const doc = cur();
@@ -593,7 +648,7 @@ function persist() {
     try {
       localStorage.setItem(storeKey, cloud.on ? JSON.stringify({ lib, snap: cloud.snap }) : JSON.stringify(lib));
     } catch (_) {
-      setSaveState("・ ⚠ この端末に下書きを残せませんでした（空き容量を確認してください）");
+      setSaveState("⚠ この端末に下書きを残せませんでした（空き容量を確認してください）");
     }
   }
   if (cloud.on) cloudChanged();
@@ -604,7 +659,7 @@ function persist() {
 function isUnsaved(d) {
   if (cloud.on) {
     const s = cloud.snap.docs[d.id];
-    if (!s) return !!d.entries?.length || d.name !== s?.name;
+    if (!s) return !!d.entries?.length || !/^文字起こし \d+\/\d+ \d+:\d{2}$/.test(d.name);
     return (d.entries && s.sig !== sig(d.entries)) || s.name !== d.name || lib.audios.some((a) => a.docId === d.id && !a.driveId);
   }
   return !!d.dirty;
@@ -612,8 +667,12 @@ function isUnsaved(d) {
 function showSaveState() {
   if (isPhoneMode || !lib.docs.length) return;
   const d = cur();
-  if (isUnsaved(d)) setSaveState("・ ● 未保存（「💾 保存」で" + (cloud.on ? "ドライブに" : "") + "保存）");
-  else setSaveState(d.savedAt ? `・ ✓ 保存済み ${d.savedAt}` : "");
+  const unsaved = isUnsaved(d);
+  const el = document.getElementById("saveState");
+  if (el) el.classList.toggle("unsaved", unsaved);
+  setSaveState(unsaved ? "● 未保存" : d.savedAt ? `✓ 保存済み ${d.savedAt}` : "");
+  $("saveDoc").classList.toggle("saved", !unsaved);
+  $("saveDoc").textContent = unsaved ? "保存" : "保存済み";
 }
 window.addEventListener("beforeunload", (e) => {
   if (!isPhoneMode && lib.docs.some(isUnsaved)) { e.preventDefault(); e.returnValue = ""; }
@@ -695,8 +754,9 @@ function render() {
     return para;
   }));
   renderAudioList();
-  if (!recording) $("rec").textContent = entries.length ? "● 続きを録音" : "● 録音開始";
-  $("docInfo").textContent = `📁 ${folderName(cur().folderId)} ・ ${entries.length}件`;
+  setRecLabel();
+  $("docInfo").textContent = entries.length ? `${entries.length}件` : "";
+  showSaveState();
   scrollToEnd();
 }
 function renderDocBar() {
@@ -723,74 +783,102 @@ function renderHome() {
     return b;
   };
   const count = (id) => lib.docs.filter((d) => id === "all" || (d.folderId || "") === id).length;
+  const add = tab("＋ フォルダ", "__add");
+  add.classList.add("addFolder");
+  add.onclick = () => { const f = createFolder(); if (f) { homeFolder = f.id; renderAll(); } };
   $("folderTabs").replaceChildren(
-    tab(`すべて (${count("all")})`, "all"),
-    tab(`未分類 (${count("")})`, ""),
-    ...lib.folders.map((f) => tab(`📁 ${f.name} (${count(f.id)})`, f.id)),
-    button("＋ フォルダ", () => { const f = createFolder(); if (f) { homeFolder = f.id; renderAll(); } }),
+    tab(`すべて ${count("all")}`, "all"),
+    tab(`未分類 ${count("")}`, ""),
+    ...lib.folders.map((f) => tab(`📁 ${f.name} ${count(f.id)}`, f.id)),
+    add,
   );
 
-  // 選んでいるフォルダの名前変更・削除
+  // 選んでいるフォルダの名前変更・削除（⋯ メニュー）
   const bar = $("homeFolderBar");
   const folder = lib.folders.find((f) => f.id === homeFolder);
   bar.replaceChildren();
   if (folder) {
     const title = document.createElement("strong");
     title.textContent = "📁 " + folder.name;
-    const actions = document.createElement("div");
-    actions.append(
-      button("名前変更", () => {
-        const n = prompt("フォルダの名前", folder.name);
-        if (n?.trim()) { folder.name = n.trim(); persist(); renderAll(); }
-      }),
-      button("フォルダ削除", () => {
-        if (!confirm(`フォルダ「${folder.name}」を削除しますか？\n中の文字起こしは「未分類」に移ります。`)) return;
-        lib.docs.forEach((d) => { if (d.folderId === folder.id) d.folderId = ""; });
-        lib.folders = lib.folders.filter((x) => x !== folder);
-        homeFolder = "all";
-        persist(); renderAll();
-      }),
-    );
-    bar.append(title, actions);
+    const more = document.createElement("button");
+    more.className = "iconbtn big";
+    more.textContent = "⋯";
+    more.title = "フォルダの操作";
+    more.onclick = (ev) => {
+      ev.stopPropagation();
+      openMenu(more, "フォルダ「" + folder.name + "」", [
+        { label: "✏ 名前を変える", onClick: () => { const n = prompt("フォルダの名前", folder.name); if (n?.trim()) { folder.name = n.trim(); persist(); renderAll(); } } },
+        { label: "🗑 フォルダを削除（中身は未分類へ）", danger: true, onClick: () => {
+          if (!confirm(`フォルダ「${folder.name}」を削除しますか？\n中の文字起こしは「未分類」に移ります。`)) return;
+          lib.docs.forEach((d) => { if (d.folderId === folder.id) d.folderId = ""; });
+          lib.folders = lib.folders.filter((x) => x !== folder);
+          homeFolder = "all";
+          persist(); renderAll();
+        } },
+      ]);
+    };
+    bar.append(title, more);
   }
 
   const docs = lib.docs
     .filter((d) => homeFolder === "all" || (d.folderId || "") === homeFolder)
+    .filter((d) => countOf(d) || isUnsaved(d) || d.id === lib.currentId || !/^文字起こし \d+\/\d+ \d+:\d{2}$/.test(d.name))
     .sort((x, y) => y.updatedAt - x.updatedAt);
   if (!docs.length) {
     const e = document.createElement("div");
     e.className = "empty";
-    e.textContent = "まだありません。「＋ 新しく録音する」から始められます。";
+    e.textContent = "まだ文字起こしがありません。\n下の「● 新しく録音する」から始めましょう。";
+    e.style.whiteSpace = "pre-line";
     $("homeList").replaceChildren(e);
     return;
   }
   $("homeList").replaceChildren(...docs.map((d) => {
-    const item = document.createElement("div");
-    item.className = "docItem" + (d.id === lib.currentId ? " current" : "");
-    const open = document.createElement("button");
-    open.className = "open";
-    open.textContent = d.name;
+    const card = document.createElement("div");
+    card.className = "docCard" + (d.id === lib.currentId ? " current" : "");
+    card.onclick = () => { openDoc(d.id); showView("editor"); };
+    const body = document.createElement("div");
+    body.className = "body";
+    const name = document.createElement("div");
+    name.className = "name";
+    name.textContent = d.name;
     const info = document.createElement("div");
     info.className = "info";
     const audios = audiosOf(d.id).length;
-    info.textContent = `${fmtDate(d.updatedAt)} ・ ${countOf(d)}件` + (audios ? ` ・ 🔊 録音${audios}` : "") +
-      (homeFolder === "all" ? ` ・ 📁 ${folderName(d.folderId)}` : "");
-    open.append(info);
-    open.onclick = () => { openDoc(d.id); showView("editor"); };
-    const move = document.createElement("select");
-    move.setAttribute("aria-label", "フォルダを移動");
-    move.append(new Option("移動…", "__"), new Option("未分類", ""), ...lib.folders.map((x) => new Option(x.name, x.id)));
-    move.onchange = () => {
-      if (move.value !== "__") { d.folderId = move.value; persist(); renderAll(); }
+    info.textContent = [fmtDate(d.updatedAt), `${countOf(d)}件`, audios ? `🔊 ${audios}` : "",
+      homeFolder === "all" && d.folderId ? `📁 ${folderName(d.folderId)}` : "", isUnsaved(d) ? "● 未保存" : ""].filter(Boolean).join("　");
+    body.append(name, info);
+    const first = d.entries?.find((e) => e.text);
+    if (first) {
+      const pv = document.createElement("div");
+      pv.className = "preview";
+      pv.textContent = first.text;
+      body.append(pv);
+    }
+    const more = document.createElement("button");
+    more.className = "iconbtn big";
+    more.textContent = "⋯";
+    more.title = "移動・削除";
+    more.onclick = (ev) => {
+      ev.stopPropagation();
+      openMenu(more, d.name, [
+        { label: "開く", onClick: () => { openDoc(d.id); showView("editor"); } },
+        "-",
+        ...[{ id: "", name: "未分類" }, ...lib.folders].map((f) => ({
+          label: `📁 ${f.name} へ移動`, current: (d.folderId || "") === f.id,
+          onClick: () => { d.folderId = f.id; persist(); renderAll(); },
+        })),
+        "-",
+        { label: "🗑 削除", danger: true, onClick: () => {
+          if (!confirm(cloud.on ? `「${d.name}」を削除しますか？（Googleドライブのゴミ箱に移ります）` : `「${d.name}」を削除しますか？（元に戻せません）`)) return;
+          lib.docs = lib.docs.filter((x) => x !== d);
+          deleteAudiosOf(d.id);
+          if (lib.currentId === d.id) { lib.currentId = null; openDoc(cur().id); }
+          persist(); renderAll();
+        } },
+      ]);
     };
-    item.append(open, move, button("削除", () => {
-      if (!confirm(cloud.on ? `「${d.name}」を削除しますか？（Googleドライブのゴミ箱に移ります）` : `「${d.name}」を削除しますか？（元に戻せません）`)) return;
-      lib.docs = lib.docs.filter((x) => x !== d);
-      deleteAudiosOf(d.id);
-      if (lib.currentId === d.id) { lib.currentId = null; openDoc(cur().id); }
-      persist(); renderAll();
-    }));
-    return item;
+    card.append(body, more);
+    return card;
   }));
 }
 
@@ -799,7 +887,7 @@ function showView(name) {
   const home = name === "home";
   $("homeView").hidden = !home;
   $("editorView").hidden = home;
-  $("homeBtn").hidden = home;
+  closeMenu();
   if (home) renderHome();
   const hash = home ? "#home" : "";
   if (location.hash !== hash) history.pushState(null, "", hash || location.pathname + location.search);
@@ -807,12 +895,34 @@ function showView(name) {
 }
 window.addEventListener("popstate", () => showView(location.hash === "#home" ? "home" : "editor"));
 $("homeBtn").onclick = () => showView("home");
+// 「⋯」メニュー：出力・新規・設定など、たまに使うもの
+$("moreBtn").onclick = (ev) => {
+  ev.stopPropagation();
+  const items = [
+    { label: "📋 文章をコピー", onClick: () => $("copy").click() },
+    { label: "📄 Word で出力", onClick: () => $("word").click() },
+    { label: "🧾 PDF で出力", onClick: () => $("pdf").click() },
+    { label: "📝 テキスト（.txt）で出力", onClick: () => $("save").click() },
+  ];
+  if (!isPhoneMode) {
+    items.push("-",
+      { label: "＋ 新しい文字起こし", onClick: () => $("newDoc").click() },
+      "-",
+      { label: "文字にする方法：AI（高精度）", current: engine === "ai", onClick: () => { $("engine").value = "ai"; $("engine").onchange(); } },
+      { label: "文字にする方法：ブラウザ（簡易）", current: engine === "browser", onClick: () => { $("engine").value = "browser"; $("engine").onchange(); } },
+      "-",
+      { label: "🗑 この中身をすべて消す", danger: true, onClick: () => $("clear").click() });
+  }
+  openMenu($("moreBtn"), "", items);
+};
 $("recBadge").onclick = () => showView("editor");
+// 「● 新しく録音する」：新しい文字起こしを作って、すぐ録音を始める
 $("homeNew").onclick = () => {
-  if (isPhoneMode) { relayNew?.(homeFolder === "all" ? "" : homeFolder); showView("editor"); return; }
+  if (isPhoneMode) { relayNew?.(homeFolder === "all" ? "" : homeFolder); showView("editor"); if (!recording) startRec(); return; }
   const doc = newDoc(homeFolder === "all" ? "" : homeFolder);
   openDoc(doc.id);
   showView("editor");
+  if (!recording) startRec();
 };
 
 $("saveDoc").onclick = async () => {
@@ -821,12 +931,12 @@ $("saveDoc").onclick = async () => {
   if (name) doc.name = name;
   if (cloud.on) {
     $("saveDoc").disabled = true;
-    setSaveState("・ ☁ ドライブに保存中…");
+    setSaveState("☁ ドライブに保存中…");
     const ok = await cloudSync(true);
     $("saveDoc").disabled = false;
     if (!ok) { toast("ドライブに保存できませんでした（この端末には残っています）"); showSaveState(); return; }
   }
-  for (const d of lib.docs) if (!isUnsaved(d) || !cloud.on) { if (d.dirty || d === doc) { d.dirty = false; if (d === doc) d.savedAt = hhmm(); } }
+  for (const d of lib.docs) d.dirty = false;
   doc.savedAt = hhmm();
   persist();
   toast(cloud.on ? "Googleドライブに保存しました" : "保存しました");
@@ -882,9 +992,10 @@ function setLive(text) {
   $("live").textContent = text;
   scrollToEnd();
 }
+// 録音中や、いちばん下を見ているときは、新しい文字が見えるように下までスクロール
 function scrollToEnd() {
-  const box = $("transcript");
-  box.scrollTop = box.scrollHeight;
+  const nearBottom = innerHeight + scrollY > document.body.scrollHeight - 260;
+  if (recording || nearBottom) window.scrollTo({ top: document.body.scrollHeight });
 }
 // words: [[単語, 何秒目から, 何秒目まで], …]（行の最初からの秒数。話者を分けるときに使う）
 function addEntry(source, text, at = Date.now(), words) {
@@ -899,6 +1010,13 @@ function addEntry(source, text, at = Date.now(), words) {
   render();
 }
 renderAll();
+// 文字起こしがあれば、最初は一覧（ホーム）から
+if (!isPhoneMode && lib.docs.some((d) => countOf(d))) {
+  $("homeView").hidden = false;
+  $("editorView").hidden = true;
+  renderHome();
+  history.replaceState(null, "", location.pathname + location.search + "#home");
+}
 
 $("copy").onclick = async () => {
   const text = entries.map((e) => (e.speaker ? speakerLabel(e) + "：" : "") + e.text).join("\n");
@@ -1048,14 +1166,14 @@ async function cloudInit() {
 function isPhoneModeOnlyRelay() { return isPhoneMode; }
 
 function cloudNotice(msg, actionLabel, action) {
-  const box = $("cloudNotice");
-  box.replaceChildren(document.createTextNode(msg));
-  if (actionLabel) {
-    const b = button(actionLabel, () => { box.hidden = true; action(); });
-    b.style.marginLeft = "8px";
-    box.append(b);
+  for (const box of [$("cloudNotice"), $("cloudNoticeHome")]) {
+    box.replaceChildren(document.createTextNode(msg));
+    if (actionLabel) {
+      const b = button(actionLabel, () => { $("cloudNotice").hidden = $("cloudNoticeHome").hidden = true; action(); });
+      box.append(b);
+    }
+    box.hidden = !msg;
   }
-  box.hidden = !msg;
 }
 
 async function onGoogleToken(resp) {
@@ -1482,6 +1600,17 @@ $("engine").onchange = () => {
 };
 
 function setLevelText(t) { $("levelText").textContent = t; }
+// 録音ボタンの文字（録音中は経過時間を出す）
+let recStartedAt = 0, recTimer = null;
+function setRecLabel() {
+  if (recording) {
+    const sec = Math.floor((Date.now() - recStartedAt) / 1000);
+    $("rec").textContent = `■ 停止　${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+    $("recBadge").textContent = `● 録音中 ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+  } else {
+    $("rec").textContent = entries.length ? "● 続きを録音" : "● 録音";
+  }
+}
 function showError(msg) {
   $("error").textContent = "⚠ " + msg;
   $("error").hidden = !msg;
@@ -1489,8 +1618,11 @@ function showError(msg) {
 function startRec() {
   showError("");
   recording = true;
-  $("rec").textContent = "■ 停止";
+  recStartedAt = Date.now();
+  clearInterval(recTimer);
+  recTimer = setInterval(setRecLabel, 1000);
   $("rec").classList.add("on");
+  setRecLabel();
   $("recBadge").hidden = false;
   $("status").textContent = "マイクを準備中…";
   navigator.wakeLock?.request("screen").then((l) => (wakeLock = l)).catch(() => {});
@@ -1500,8 +1632,9 @@ function stopRec() {
   recording = false;
   stopAi();
   stopBrowser();
-  $("rec").textContent = entries.length ? "● 続きを録音" : "● 録音開始";
+  clearInterval(recTimer);
   $("rec").classList.remove("on");
+  setRecLabel();
   $("recBadge").hidden = true;
   if (!aiPending) setLive("");
   $("status").textContent = "";
@@ -1820,7 +1953,10 @@ if (typeof qrcode === "undefined" && !isPhoneMode) {
   $("status").textContent = "QRコードの準備ができませんでした（ネット接続を確認して再読み込みしてください）";
 } else if (!isPhoneMode) {
   // PC側: 部屋をつくってQRコードを表示（再読み込みしても同じQRコードのまま）
-  $("pairCard").hidden = false;
+  $("pairBtn").hidden = false;
+  $("pairBtn").onclick = () => { $("pairCard").hidden = false; };
+  $("pairClose").onclick = () => { $("pairCard").hidden = true; };
+  $("pairCard").onclick = (ev) => { if (ev.target === $("pairCard")) $("pairCard").hidden = true; };
   let roomId = "";
   try { roomId = localStorage.getItem("mojiokoshi-room") || ""; } catch (_) {}
   if (!/^[a-z0-9]{10,32}$/.test(roomId)) {
@@ -1839,9 +1975,14 @@ if (typeof qrcode === "undefined" && !isPhoneMode) {
     if (msg.type === "hello") {
       relayPeerSeen = true;
       $("pairStatus").textContent = "✅ スマホがつながりました";
+      $("pairBtn").innerHTML = "📱 スマホ<br>接続中";
+      setTimeout(() => { $("pairCard").hidden = true; }, 1200);
       relaySync();
     }
-    if (msg.type === "peer-leave") $("pairStatus").textContent = "スマホの接続が切れました（スマホでページを開き直すと、自動でつながります）";
+    if (msg.type === "peer-leave") {
+      $("pairStatus").textContent = "スマホの接続が切れました（スマホでページを開き直すと、自動でつながります）";
+      $("pairBtn").innerHTML = "📱 スマホを<br>マイクに";
+    }
     // スマホのホーム画面から「この文字起こしを開いて」「新しく作って」
     if (msg.type === "open" && lib.docs.some((d) => d.id === msg.id)) { openDoc(msg.id); showView("editor"); relaySync(); }
     if (msg.type === "new") { const doc = newDoc(String(msg.folderId || "")); openDoc(doc.id); showView("editor"); relaySync(); }
