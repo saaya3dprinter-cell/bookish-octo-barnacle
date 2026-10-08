@@ -283,7 +283,7 @@ function saveRecordingBlob(docId, start, blob, mime, duration) {
     persist();
     render();
     // 録音の最後の文字起こしが届くのを少し待ってから、話した人を分析
-    setTimeout(() => diarizeRecording(a, blob), 4000);
+    setTimeout(() => diarizeRecording(a, blob, true), 4000);
   }).catch(() => showError("録音データを保存できませんでした（端末の空き容量を確認してください）"));
 }
 // 「11:42:45」のような時刻から、その時間を含む録音と何秒目かを探す
@@ -310,17 +310,35 @@ const SPEAKER_COLORS = ["#ffe3cc", "#d8ecff", "#dff5e1", "#f3e0ff", "#fff3b8", "
 const speakerLabel = (e) => e.speakerName || e.speaker;
 const speakerColor = (key) => SPEAKER_COLORS[(key.charCodeAt(0) - 65) % SPEAKER_COLORS.length];
 
-async function diarizeRecording(a, blob) {
+// 話者を選ぶ範囲：録音があればその録音の行、なければ「録音のない行」どうし
+function scopeOf(a) {
+  const doc = cur();
+  return a ? doc.entries.filter((x) => offsetIn(a, x.time) !== null) : doc.entries.filter((x) => !findAudioAt(x.time));
+}
+// quiet = 録音直後の自動分析（うまくいかなくても静かにする）
+async function diarizeRecording(a, blob, quiet = false) {
+  const doc = lib.docs.find((d) => d.id === a.docId);
+  if (!doc?.entries?.some((e) => offsetIn(a, e.time) !== null)) {
+    if (!quiet) toast("この録音の時間に文字がないため、話者を分けられませんでした");
+    return;
+  }
   try {
     const res = await fetch("/api/diarize", { method: "POST", body: blob, headers: { "Content-Type": a.mime.split(";")[0] } });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      if (data.error === "quota") toast("今日のAIの無料分を使い切ったため、話した人の分析はできませんでした");
+      toast(data.error === "quota"
+        ? "今日のAIの無料分を使い切ったため、話した人の分析はできませんでした（明日また使えます）"
+        : "話した人の分析がうまくいきませんでした。少しあとでもう一度お試しください");
       return;
     }
-    if (!data.words?.length) return;
+    if (!data.words?.length) {
+      if (!quiet) toast("声をうまく聞き取れず、話者を分けられませんでした。行の印を押すと手で選べます");
+      return;
+    }
     assignSpeakers(a, data.words);
-  } catch (_) {}
+  } catch (_) {
+    if (!quiet) toast("サーバーにつながらず、話者を分けられませんでした");
+  }
 }
 function assignSpeakers(a, words) {
   const doc = lib.docs.find((d) => d.id === a.docId);
@@ -406,7 +424,7 @@ function setSpeaker(e, a, key) {
   // QRでつないだスマホは、PCに「この行の話者を変えて」と頼む（PCが変えて、結果がスマホにも戻ってくる）
   if (isPhoneMode) relayRoom?.send({ type: "speaker", time: e.time, text: e.text, key });
   const doc = cur();
-  const same = a ? doc.entries.filter((x) => offsetIn(a, x.time) !== null) : doc.entries;
+  const same = scopeOf(a);
   e.speaker = key;
   const name = same.find((x) => x !== e && x.speaker === key && x.speakerName)?.speakerName;
   if (name) e.speakerName = name; else delete e.speakerName;
@@ -465,8 +483,7 @@ window.addEventListener("scroll", closeMenu, true);
 
 // 話者の印を押したときのメニュー：だれが話したかを選ぶ・名前を変える
 function openSpeakerMenu(anchor, e, a) {
-  const doc = cur();
-  const same = a ? doc.entries.filter((x) => offsetIn(a, x.time) !== null) : doc.entries;
+  const same = scopeOf(a);
   const people = {};
   for (const x of same) if (x.speaker && !(x.speaker in people)) people[x.speaker] = "";
   for (const x of same) if (x.speaker && x.speakerName) people[x.speaker] = x.speakerName;
@@ -481,17 +498,16 @@ function openSpeakerMenu(anchor, e, a) {
 }
 // 録音ごとに、話者の名前を付け替える
 function renameSpeaker(a, key) {
-  const doc = cur();
-  const rows = a ? doc.entries.filter((e) => e.speaker === key && offsetIn(a, e.time) !== null) : doc.entries.filter((e) => e.speaker === key);
+  const rows = scopeOf(a).filter((e) => e.speaker === key);
   const now = rows.find((e) => e.speakerName)?.speakerName || "";
-  const name = prompt(`話者「${key}」の名前（${a ? "この録音の中だけ" : "この文字起こしの中で"}変わります。空にすると ${key} に戻ります）`, now);
+  const name = prompt(`話者「${key}」の名前（${a ? "この録音の中だけ" : "録音のない行の中だけ"}変わります。空にすると ${key} に戻ります）`, now);
   if (name === null) return;
   if (isPhoneMode) relayRoom?.send({ type: "rename", audioId: a?.id || "", key, name });
   applyRename(a, key, name);
 }
 function applyRename(a, key, name) {
   const doc = cur();
-  const rows = a ? doc.entries.filter((e) => e.speaker === key && offsetIn(a, e.time) !== null) : doc.entries.filter((e) => e.speaker === key);
+  const rows = scopeOf(a).filter((e) => e.speaker === key);
   for (const e of rows) {
     if (name.trim()) e.speakerName = name.trim(); else delete e.speakerName;
   }
@@ -745,9 +761,9 @@ function render() {
       tag.textContent = speakerLabel(e) + " ▾";
     } else {
       tag.className = "tag" + (e.source === "スマホ" ? " phone" : "");
-      tag.textContent = e.source + (hit ? " ▾" : "");
+      tag.textContent = e.source + " ▾";
     }
-    if (e.speaker || hit) {
+    {
       tag.classList.add("pick");
       tag.title = "押すと、だれが話したかを選べます";
       tag.onclick = (ev) => { ev.stopPropagation(); openSpeakerMenu(tag, e, hit?.audio); };
