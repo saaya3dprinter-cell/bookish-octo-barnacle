@@ -21,14 +21,17 @@
          background:var(--accent); color:#fff; cursor:pointer; }
   #rec.on { background:#d62f2f; }
   #rec:disabled { opacity:.5; }
-  #interim { min-height:1.6em; margin-top:10px; color:var(--muted); }
+  #transcript { min-height:45vh; max-height:62vh; overflow-y:auto; font-size:1.35rem; line-height:1.8;
+                margin-top:10px; padding-right:4px; }
+  #transcript p { margin:0 0 10px; }
+  #transcript .meta { font-size:.7rem; color:var(--muted); margin-right:6px; vertical-align:middle; }
+  #live { color:var(--muted); }
+  #live:empty::before { content: attr(data-hint); font-size:1rem; }
+  .controls { position:sticky; bottom:0; padding:10px 0 14px; background:var(--bg); }
   #status { font-size:.9rem; color:var(--muted); margin-top:6px; }
   #qr { display:flex; justify-content:center; margin:10px 0; }
   #qr img { background:#fff; padding:8px; border-radius:8px; width:200px; height:200px; image-rendering: pixelated; }
   #phoneLink { font-size:.8rem; word-break: break-all; color: var(--muted); }
-  #list { list-style:none; margin:0; padding:0; }
-  #list li { padding:8px 0; border-bottom:1px solid var(--line); line-height:1.6; }
-  #list .meta { font-size:.75rem; color:var(--muted); }
   .tag { display:inline-block; padding:0 6px; border-radius:6px; background:#ffe3cc; color:#222; margin-left:4px; }
   .tag.phone { background:#d8ecff; }
   .row { display:flex; gap:8px; justify-content:space-between; align-items:center; flex-wrap:wrap; }
@@ -45,8 +48,19 @@
   </div>
 
   <div class="card">
+    <div class="row">
+      <strong>文字起こし</strong>
+      <div>
+        <button class="small" id="copy">コピー</button>
+        <button class="small" id="save">.txt保存</button>
+        <button class="small" id="clear">クリア</button>
+      </div>
+    </div>
+    <div id="transcript"><div id="done"></div><p id="live" data-hint="「● 録音開始」を押して話すと、ここに文字がどんどん出てきます"></p></div>
+  </div>
+
+  <div class="controls">
     <button id="rec">● 録音開始</button>
-    <div id="interim"></div>
     <div id="status"></div>
   </div>
 
@@ -58,17 +72,6 @@
     <div id="pairStatus" class="sub" style="margin:6px 0 0"></div>
   </div>
 
-  <div class="card">
-    <div class="row">
-      <strong>文字起こし結果</strong>
-      <div>
-        <button class="small" id="copy">コピー</button>
-        <button class="small" id="save">.txt保存</button>
-        <button class="small" id="clear">クリア</button>
-      </div>
-    </div>
-    <ul id="list"></ul>
-  </div>
 </main>
 
 <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
@@ -90,20 +93,28 @@ try { entries = JSON.parse(localStorage.getItem(STORE_KEY) || "[]"); } catch (_)
 function persist() { try { localStorage.setItem(STORE_KEY, JSON.stringify(entries)); } catch (_) {} }
 
 function render() {
-  $("list").replaceChildren(...entries.slice().reverse().map((e) => {
-    const li = document.createElement("li");
-    const meta = document.createElement("div");
+  $("done").replaceChildren(...entries.map((e) => {
+    const para = document.createElement("p");
+    const meta = document.createElement("span");
     meta.className = "meta";
     meta.textContent = e.time;
     const tag = document.createElement("span");
     tag.className = "tag" + (e.source === "スマホ" ? " phone" : "");
     tag.textContent = e.source;
     meta.append(tag);
-    const body = document.createElement("div");
-    body.textContent = e.text;
-    li.append(meta, body);
-    return li;
+    para.append(meta, document.createTextNode(e.text));
+    return para;
   }));
+  scrollToEnd();
+}
+// 話している途中の文字（まだ確定していない部分）をそのまま表示
+function setLive(text) {
+  $("live").textContent = text;
+  scrollToEnd();
+}
+function scrollToEnd() {
+  const box = $("transcript");
+  box.scrollTop = box.scrollHeight;
 }
 function addEntry(source, text) {
   text = text.trim();
@@ -154,7 +165,7 @@ function startRec() {
       if (r.isFinal) onFinal(r[0].transcript);
       else interim += r[0].transcript;
     }
-    $("interim").textContent = interim;
+    setLive(interim);
     onInterim(interim);
   };
   recog.onerror = (ev) => {
@@ -182,7 +193,7 @@ function stopRec() {
   try { recog?.stop(); } catch (_) {}
   $("rec").textContent = "● 録音開始";
   $("rec").classList.remove("on");
-  $("interim").textContent = "";
+  setLive("");
   $("status").textContent = "";
   onInterim("");
   wakeLock?.release?.(); wakeLock = null;
@@ -210,8 +221,8 @@ if (typeof Peer === "undefined" || typeof qrcode === "undefined") {
   peer.on("connection", (conn) => {
     conn.on("open", () => { $("pairStatus").textContent = "✅ スマホがつながりました"; });
     conn.on("data", (msg) => {
-      if (msg?.type === "final") { addEntry("スマホ", String(msg.text)); $("interim").textContent = ""; }
-      if (msg?.type === "interim") $("interim").textContent = "📱 " + String(msg.text);
+      if (msg?.type === "final") { addEntry("スマホ", String(msg.text)); setLive(""); }
+      if (msg?.type === "interim") setLive(String(msg.text));
     });
     conn.on("close", () => { $("pairStatus").textContent = "スマホの接続が切れました。もう一度QRコードを読み取ってください。"; });
   });
