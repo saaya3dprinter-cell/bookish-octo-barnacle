@@ -403,6 +403,8 @@ function assignSpeakers(a, words) {
 }
 // 1行だけ、話者を変える（同じ録音で同じ人に名前があれば、その名前になる）
 function setSpeaker(e, a, key) {
+  // QRでつないだスマホは、PCに「この行の話者を変えて」と頼む（PCが変えて、結果がスマホにも戻ってくる）
+  if (isPhoneMode) relayRoom?.send({ type: "speaker", time: e.time, text: e.text, key });
   const doc = cur();
   const same = a ? doc.entries.filter((x) => offsetIn(a, x.time) !== null) : doc.entries;
   e.speaker = key;
@@ -484,6 +486,12 @@ function renameSpeaker(a, key) {
   const now = rows.find((e) => e.speakerName)?.speakerName || "";
   const name = prompt(`話者「${key}」の名前（${a ? "この録音の中だけ" : "この文字起こしの中で"}変わります。空にすると ${key} に戻ります）`, now);
   if (name === null) return;
+  if (isPhoneMode) relayRoom?.send({ type: "rename", audioId: a?.id || "", key, name });
+  applyRename(a, key, name);
+}
+function applyRename(a, key, name) {
+  const doc = cur();
+  const rows = a ? doc.entries.filter((e) => e.speaker === key && offsetIn(a, e.time) !== null) : doc.entries.filter((e) => e.speaker === key);
   for (const e of rows) {
     if (name.trim()) e.speakerName = name.trim(); else delete e.speakerName;
   }
@@ -734,12 +742,12 @@ function render() {
       // 話者（押すと「だれが話したか」を選べる）
       tag.className = "tag speaker";
       tag.style.background = speakerColor(e.speaker);
-      tag.textContent = speakerLabel(e) + (isPhoneMode ? "" : " ▾");
+      tag.textContent = speakerLabel(e) + " ▾";
     } else {
       tag.className = "tag" + (e.source === "スマホ" ? " phone" : "");
-      tag.textContent = e.source + (isPhoneMode || !hit ? "" : " ▾");
+      tag.textContent = e.source + (hit ? " ▾" : "");
     }
-    if (!isPhoneMode && (e.speaker || hit)) {
+    if (e.speaker || hit) {
       tag.classList.add("pick");
       tag.title = "押すと、だれが話したかを選べます";
       tag.onclick = (ev) => { ev.stopPropagation(); openSpeakerMenu(tag, e, hit?.audio); };
@@ -904,6 +912,11 @@ $("moreBtn").onclick = (ev) => {
     { label: "🧾 PDF で出力", onClick: () => $("pdf").click() },
     { label: "📝 テキスト（.txt）で出力", onClick: () => $("save").click() },
   ];
+  if (!isPhoneMode && !$("account").hidden) {
+    items.push("-", cloud.on
+      ? { label: `👤 ${cloud.email}（ログアウト）`, onClick: () => $("logout").click() }
+      : { label: "🔑 Googleでログイン（ドライブに保存）", onClick: () => $("login").click() });
+  }
   if (!isPhoneMode) {
     items.push("-",
       { label: "＋ 新しい文字起こし", onClick: () => $("newDoc").click() },
@@ -1010,8 +1023,8 @@ function addEntry(source, text, at = Date.now(), words) {
   render();
 }
 renderAll();
-// 文字起こしがあれば、最初は一覧（ホーム）から
-if (!isPhoneMode && lib.docs.some((d) => countOf(d))) {
+// 最初は一覧（ホーム）から（ログインボタンもここ）
+if (!isPhoneMode) {
   $("homeView").hidden = false;
   $("editorView").hidden = true;
   renderHome();
@@ -1988,6 +2001,15 @@ if (typeof qrcode === "undefined" && !isPhoneMode) {
     if (msg.type === "new") { const doc = newDoc(String(msg.folderId || "")); openDoc(doc.id); showView("editor"); relaySync(); }
     if (msg.type === "final") { addEntry("スマホ", String(msg.text), Number(msg.at) || Date.now(), Array.isArray(msg.words) ? msg.words : undefined); setLive(""); }
     if (msg.type === "interim") setLive(String(msg.text || ""));
+    // スマホで話者を変えた・名前を付けた
+    if (msg.type === "speaker") {
+      const e = cur().entries.find((x) => x.time === msg.time && x.text === msg.text);
+      if (e) setSpeaker(e, findAudioAt(e.time)?.audio, String(msg.key).slice(0, 1));
+    }
+    if (msg.type === "rename") {
+      const a = lib.audios.find((x) => x.id === msg.audioId);
+      applyRename(a, String(msg.key).slice(0, 1), String(msg.name || "").slice(0, 40));
+    }
     if (msg.type === "getaudio") {
       // スマホから「この録音を聞きたい」
       const a = lib.audios.find((x) => x.id === msg.id);
