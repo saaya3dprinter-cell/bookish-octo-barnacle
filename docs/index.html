@@ -28,6 +28,11 @@
   #live { color:var(--muted); }
   #live:empty::before { content: attr(data-hint); font-size:1rem; }
   .controls { position:sticky; bottom:0; padding:10px 0 14px; background:var(--bg); }
+  .meterRow { display:flex; align-items:center; gap:8px; margin-top:10px; font-size:.85rem; color:var(--muted); }
+  .meter { flex:1; height:12px; background:var(--line); border-radius:6px; overflow:hidden; }
+  #level { height:100%; width:0; background:#2bb673; border-radius:6px; transition: width .06s linear; }
+  #level.pulse { width:60%; animation: pulse .6s ease-in-out infinite alternate; }
+  @keyframes pulse { from { width:25%; } to { width:85%; } }
   #status { font-size:.9rem; color:var(--muted); margin-top:6px; }
   #qr { display:flex; justify-content:center; margin:10px 0; }
   #qr img { background:#fff; padding:8px; border-radius:8px; width:200px; height:200px; image-rendering: pixelated; }
@@ -61,6 +66,7 @@
 
   <div class="controls">
     <button id="rec">● 録音開始</button>
+    <div class="meterRow"><span>🎤</span><div class="meter"><div id="level"></div></div><span id="levelText">停止中</span></div>
     <div id="status"></div>
   </div>
 
@@ -153,6 +159,52 @@ if (!SR) {
   $("rec").disabled = true;
 }
 
+// ---------------------------------------------------------- 音のバー
+// スマホは音声認識とマイク計測を同時に使うと止まることがあるので、
+// 「音を検知した/していない」の表示だけにする
+const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+let meter = null;
+function setLevelText(t) { $("levelText").textContent = t; }
+
+async function startMeter() {
+  if (isMobile) { setLevelText("待機中"); return; }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 1024;
+    ctx.createMediaStreamSource(stream).connect(analyser);
+    const buf = new Float32Array(analyser.fftSize);
+    meter = { stream, ctx, raf: 0, level: 0, quietSince: performance.now() };
+    const tick = () => {
+      analyser.getFloatTimeDomainData(buf);
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+      const rms = Math.sqrt(sum / buf.length);
+      meter.level = Math.max(rms, meter.level * 0.85);  // 少しゆっくり下がるように
+      $("level").style.width = Math.min(100, meter.level * 500) + "%";
+      const now = performance.now();
+      if (rms > 0.02) { meter.quietSince = now; setLevelText("音が入っています"); }
+      else if (now - meter.quietSince > 3000) setLevelText("音が聞こえません");
+      meter.raf = requestAnimationFrame(tick);
+    };
+    tick();
+  } catch (_) {
+    setLevelText("バー表示できません");
+  }
+}
+function stopMeter() {
+  if (meter) {
+    cancelAnimationFrame(meter.raf);
+    meter.stream.getTracks().forEach((t) => t.stop());
+    meter.ctx.close();
+    meter = null;
+  }
+  $("level").classList.remove("pulse");
+  $("level").style.width = "0";
+  setLevelText("停止中");
+}
+
 function startRec() {
   recog = new SR();
   recog.lang = "ja-JP";
@@ -180,9 +232,14 @@ function startRec() {
     }
   };
   // 無音が続くとブラウザが勝手に止めるので、録音中なら自動で再開する
+  if (isMobile) {
+    recog.onsoundstart = () => { $("level").classList.add("pulse"); setLevelText("音が入っています"); };
+    recog.onsoundend = () => { $("level").classList.remove("pulse"); setLevelText("待機中"); };
+  }
   recog.onend = () => { if (recording) setTimeout(() => { try { recog.start(); } catch (_) {} }, 250); };
   recog.start();
   recording = true;
+  startMeter();
   $("rec").textContent = "■ 停止";
   $("rec").classList.add("on");
   $("status").textContent = "聞き取り中…（話すと文字になります）";
@@ -197,6 +254,7 @@ function stopRec() {
   $("status").textContent = "";
   onInterim("");
   wakeLock?.release?.(); wakeLock = null;
+  stopMeter();
 }
 $("rec").onclick = () => (recording ? stopRec() : startRec());
 
