@@ -30,9 +30,22 @@
   .controls { position:sticky; bottom:0; padding:10px 0 14px; background:var(--bg); }
   .meterRow { display:flex; align-items:center; gap:8px; margin-top:10px; font-size:.85rem; color:var(--muted); }
   .meter { flex:1; height:12px; background:var(--line); border-radius:6px; overflow:hidden; }
-  #level { height:100%; width:0; background:#2bb673; border-radius:6px; transition: width .06s linear; }
-  #level.pulse { width:60%; animation: pulse .6s ease-in-out infinite alternate; }
-  @keyframes pulse { from { width:25%; } to { width:85%; } }
+  #level { height:100%; width:0; background:#2bb673; border-radius:6px; transition: width .2s ease-out; }
+  #level.heard { width:100%; opacity:.45; }
+  .docBar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:10px; }
+  .docBar input, .docBar select, #library select { font:inherit; padding:7px 10px; border-radius:8px;
+         border:1px solid #ccc; background:var(--card); color:var(--fg); }
+  #docName { flex:1; min-width:180px; font-weight:700; }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); font-weight:700; }
+  #library summary { cursor:pointer; font-weight:700; }
+  .folder { margin-top:14px; }
+  .folderHead { display:flex; align-items:center; gap:6px; font-weight:700; padding:6px 0; border-bottom:1px solid var(--line); }
+  .folderHead .name { flex:1; }
+  .docItem { display:flex; align-items:center; gap:6px; padding:8px 4px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  .docItem.current { background:rgba(255,122,26,.12); border-radius:8px; }
+  .docItem .open { flex:1; min-width:160px; text-align:left; background:none; border:0; color:var(--fg); cursor:pointer; font:inherit; padding:0; }
+  .docItem .info { font-size:.75rem; color:var(--muted); }
+  .empty { color:var(--muted); font-size:.85rem; padding:6px 0; }
   #error { background:#ffe1e1; color:#8a1010; padding:10px 12px; border-radius:10px; margin-top:8px; font-size:.95rem; }
   #printArea { display:none; }
   @media print {
@@ -64,8 +77,13 @@
   </div>
 
   <div class="card">
+    <div class="docBar">
+      <input id="docName" placeholder="文字起こしの名前" aria-label="文字起こしの名前">
+      <select id="docFolder" aria-label="入れるフォルダ"></select>
+      <button class="small primary" id="newDoc">＋ 新規</button>
+    </div>
     <div class="row">
-      <strong>文字起こし</strong>
+      <span class="sub" id="docInfo" style="margin:0"></span>
       <div>
         <button class="small" id="copy">コピー</button>
         <button class="small" id="word">Word</button>
@@ -83,6 +101,13 @@
     <div id="status"></div>
     <div id="error" hidden></div>
   </div>
+
+  <details class="card" id="library">
+    <summary>📁 保存した文字起こし（フォルダ）</summary>
+    <div class="sub" style="margin:8px 0 0">このブラウザの中に保存されます。名前を押すと開きます。</div>
+    <button class="small" id="newFolder" style="margin-top:8px">＋ フォルダを作る</button>
+    <div id="folders"></div>
+  </details>
 
   <div class="card" id="pairCard" hidden>
     <strong>📱 スマホをマイクにする</strong>
@@ -107,11 +132,54 @@ $("where").textContent = isPhoneMode
   ? "このスマホのマイクで話すと、PCの画面に文字が届きます"
   : "このPCのマイクで録音できます。マイクがないときは下のQRコードでスマホをつなげます";
 
-// ---------------------------------------------------------- 結果リスト
-const STORE_KEY = "transcripts-v1";
-let entries = [];
-try { entries = JSON.parse(localStorage.getItem(STORE_KEY) || "[]"); } catch (_) {}
-function persist() { try { localStorage.setItem(STORE_KEY, JSON.stringify(entries)); } catch (_) {} }
+// ---------------------------------------------------------- 保存データ（フォルダ・文字起こし）
+// { folders:[{id,name}], docs:[{id,name,folderId,createdAt,updatedAt,entries:[{time,source,text}]}], currentId }
+const DB_KEY = "mojiokoshi-library-v1";
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+let lib = null;
+try { lib = JSON.parse(localStorage.getItem(DB_KEY) || "null"); } catch (_) {}
+if (!lib || !Array.isArray(lib.docs)) lib = { folders: [], docs: [], currentId: null };
+// 以前のバージョンの結果があれば1つの文字起こしとして引き継ぐ
+try {
+  const old = JSON.parse(localStorage.getItem("transcripts-v1") || "[]");
+  if (old.length) {
+    lib.docs.push({ id: uid(), name: "以前の文字起こし", folderId: "", createdAt: Date.now(), updatedAt: Date.now(), entries: old });
+    localStorage.removeItem("transcripts-v1");
+  }
+} catch (_) {}
+function persist() { try { localStorage.setItem(DB_KEY, JSON.stringify(lib)); } catch (_) {} }
+
+function defaultName() {
+  const d = new Date();
+  return `文字起こし ${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+function newDoc(folderId = "") {
+  const doc = { id: uid(), name: defaultName(), folderId, createdAt: Date.now(), updatedAt: Date.now(), entries: [] };
+  lib.docs.push(doc);
+  lib.currentId = doc.id;
+  persist();
+  return doc;
+}
+function cur() {
+  return lib.docs.find((d) => d.id === lib.currentId) || lib.docs[lib.docs.length - 1] || newDoc();
+}
+let entries = cur().entries;
+lib.currentId = cur().id;
+
+function openDoc(id) {
+  lib.currentId = id;
+  entries = cur().entries;
+  persist();
+  setLive("");
+  renderAll();
+}
+function folderName(id) {
+  return lib.folders.find((f) => f.id === id)?.name || "未分類";
+}
+function fmtDate(t) {
+  const d = new Date(t);
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
 
 function render() {
   $("done").replaceChildren(...entries.map((e) => {
@@ -126,8 +194,120 @@ function render() {
     para.append(meta, document.createTextNode(e.text));
     return para;
   }));
+  $("docInfo").textContent = `📁 ${folderName(cur().folderId)} ・ ${entries.length}件`;
   scrollToEnd();
 }
+function renderDocBar() {
+  const doc = cur();
+  if (document.activeElement !== $("docName")) $("docName").value = doc.name;
+  const sel = $("docFolder");
+  sel.replaceChildren(
+    new Option("📁 未分類", ""),
+    ...lib.folders.map((f) => new Option("📁 " + f.name, f.id)),
+    new Option("＋ 新しいフォルダ…", "__new"),
+  );
+  sel.value = doc.folderId || "";
+}
+function renderLibrary() {
+  const groups = [{ id: "", name: "未分類" }, ...lib.folders];
+  $("folders").replaceChildren(...groups.map((f) => {
+    const box = document.createElement("div");
+    box.className = "folder";
+    const head = document.createElement("div");
+    head.className = "folderHead";
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = "📁 " + f.name;
+    head.append(name);
+    if (f.id) {
+      head.append(
+        button("名前変更", () => {
+          const n = prompt("フォルダの名前", f.name);
+          if (n?.trim()) { f.name = n.trim(); persist(); renderAll(); }
+        }),
+        button("削除", () => {
+          if (!confirm(`フォルダ「${f.name}」を削除しますか？\n中の文字起こしは「未分類」に移ります。`)) return;
+          lib.docs.forEach((d) => { if (d.folderId === f.id) d.folderId = ""; });
+          lib.folders = lib.folders.filter((x) => x !== f);
+          persist(); renderAll();
+        }),
+      );
+    }
+    box.append(head);
+    const docs = lib.docs.filter((d) => (d.folderId || "") === f.id).sort((a, b) => b.updatedAt - a.updatedAt);
+    if (!docs.length) {
+      const e = document.createElement("div");
+      e.className = "empty";
+      e.textContent = "まだありません";
+      box.append(e);
+    }
+    for (const d of docs) {
+      const item = document.createElement("div");
+      item.className = "docItem" + (d.id === lib.currentId ? " current" : "");
+      const open = document.createElement("button");
+      open.className = "open";
+      open.textContent = d.name;
+      const info = document.createElement("div");
+      info.className = "info";
+      info.textContent = `${fmtDate(d.updatedAt)} ・ ${d.entries.length}件` + (d.id === lib.currentId ? " ・ 表示中" : "");
+      open.append(info);
+      open.onclick = () => { openDoc(d.id); window.scrollTo({ top: 0, behavior: "smooth" }); };
+      const move = document.createElement("select");
+      move.setAttribute("aria-label", "フォルダを移動");
+      move.append(new Option("移動…", "__"), new Option("未分類", ""), ...lib.folders.map((x) => new Option(x.name, x.id)));
+      move.onchange = () => {
+        if (move.value !== "__") { d.folderId = move.value; persist(); renderAll(); }
+      };
+      item.append(open, move, button("削除", () => {
+        if (!confirm(`「${d.name}」を削除しますか？（元に戻せません）`)) return;
+        lib.docs = lib.docs.filter((x) => x !== d);
+        if (lib.currentId === d.id) { lib.currentId = null; entries = cur().entries; lib.currentId = cur().id; }
+        persist(); renderAll();
+      }));
+      box.append(item);
+    }
+    return box;
+  }));
+}
+function button(label, onclick) {
+  const b = document.createElement("button");
+  b.className = "small";
+  b.textContent = label;
+  b.onclick = onclick;
+  return b;
+}
+function renderAll() { render(); renderDocBar(); renderLibrary(); }
+
+function createFolder() {
+  const n = prompt("新しいフォルダの名前（例：お客さん名、作品名）");
+  if (!n?.trim()) return null;
+  const f = { id: uid(), name: n.trim() };
+  lib.folders.push(f);
+  persist();
+  return f;
+}
+
+$("docName").oninput = () => {
+  cur().name = $("docName").value.trim() || defaultName();
+  persist();
+  renderLibrary();
+};
+$("docName").onblur = () => renderDocBar();
+$("docFolder").onchange = () => {
+  let id = $("docFolder").value;
+  if (id === "__new") id = createFolder()?.id ?? cur().folderId;
+  cur().folderId = id;
+  persist();
+  renderAll();
+};
+$("newDoc").onclick = () => {
+  const doc = newDoc(cur().folderId);  // 今のフォルダに新しく作る
+  openDoc(doc.id);
+  $("docName").focus();
+  $("docName").select();
+};
+$("newFolder").onclick = () => { if (createFolder()) renderAll(); };
+
 // 話している途中の文字（まだ確定していない部分）をそのまま表示
 function setLive(text) {
   $("live").textContent = text;
@@ -141,10 +321,12 @@ function addEntry(source, text) {
   text = text.trim();
   if (!text) return;
   entries.push({ time: new Date().toLocaleTimeString("ja-JP"), source, text });
+  cur().updatedAt = Date.now();
   persist();
   render();
+  renderLibrary();
 }
-render();
+renderAll();
 
 $("copy").onclick = async () => {
   const text = entries.map((e) => e.text).join("\n");
@@ -152,10 +334,6 @@ $("copy").onclick = async () => {
   catch (_) { prompt("コピーしてください", text); }
 };
 // ---------------------------------------------------------- 出力（txt / Word / PDF）
-function today() {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
 function downloadBlob(blob, filename) {
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -164,6 +342,10 @@ function downloadBlob(blob, filename) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+// ファイル名に使えない記号を消す
+function fileBase() {
+  return cur().name.replace(/[\\/:*?"<>|]/g, "_").trim() || "mojiokoshi";
 }
 function hasEntries() {
   if (entries.length) return true;
@@ -174,7 +356,7 @@ function hasEntries() {
 $("save").onclick = () => {
   if (!hasEntries()) return;
   const text = entries.map((e) => `[${e.time}] (${e.source}) ${e.text}`).join("\n");
-  downloadBlob(new Blob([text], { type: "text/plain" }), `mojiokoshi_${today()}.txt`);
+  downloadBlob(new Blob([text], { type: "text/plain" }), `${fileBase()}.txt`);
 };
 
 // Word（.docx）: ライブラリは大きいので、ボタンを押したときだけ読み込む
@@ -200,8 +382,8 @@ $("word").onclick = async () => {
       styles: { default: { document: { run: { font, size: 22 } } } },
       sections: [{
         children: [
-          new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun({ text: "文字起こし", font })] }),
-          new Paragraph({ children: [new TextRun({ text: today(), color: "666666", size: 20 })] }),
+          new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun({ text: cur().name, font })] }),
+          new Paragraph({ children: [new TextRun({ text: `${fmtDate(cur().createdAt)} ・ ${folderName(cur().folderId)}`, color: "666666", size: 20 })] }),
           new Paragraph({}),
           ...entries.map((e) => new Paragraph({
             spacing: { after: 120 },
@@ -213,7 +395,7 @@ $("word").onclick = async () => {
         ],
       }],
     });
-    downloadBlob(await Packer.toBlob(doc), `mojiokoshi_${today()}.docx`);
+    downloadBlob(await Packer.toBlob(doc), `${fileBase()}.docx`);
   } catch (err) {
     alert("Wordファイルを作れませんでした: " + err.message);
   } finally {
@@ -227,10 +409,10 @@ $("pdf").onclick = () => {
   if (!hasEntries()) return;
   const area = $("printArea");
   const h1 = document.createElement("h1");
-  h1.textContent = "文字起こし";
+  h1.textContent = cur().name;
   const date = document.createElement("div");
   date.className = "date";
-  date.textContent = today();
+  date.textContent = `${fmtDate(cur().createdAt)} ・ ${folderName(cur().folderId)}`;
   area.replaceChildren(h1, date, ...entries.map((e) => {
     const para = document.createElement("p");
     const meta = document.createElement("span");
@@ -240,12 +422,12 @@ $("pdf").onclick = () => {
     return para;
   }));
   const oldTitle = document.title;
-  document.title = `mojiokoshi_${today()}`;  // PDFのファイル名になる
+  document.title = fileBase();  // PDFのファイル名になる
   window.print();
   document.title = oldTitle;
 };
 $("clear").onclick = () => {
-  if (confirm("文字起こし結果を全部消しますか？")) { entries = []; persist(); render(); }
+  if (confirm(`「${cur().name}」の中身を全部消しますか？`)) { entries.length = 0; persist(); renderAll(); }
 };
 
 // ---------------------------------------------------------- 音声認識（ブラウザ標準の機能・無料）
@@ -281,8 +463,8 @@ async function startMeter() {
       let sum = 0;
       for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
       const rms = Math.sqrt(sum / buf.length);
-      meter.level = Math.max(rms, meter.level * 0.85);  // 少しゆっくり下がるように
-      $("level").style.width = Math.min(100, meter.level * 500) + "%";
+      meter.level = meter.level * 0.9 + rms * 0.1;  // なめらかに動くように平均をとる
+      $("level").style.width = Math.min(100, meter.level * 900) + "%";
       const now = performance.now();
       if (rms > 0.02) { meter.quietSince = now; setLevelText("音が入っています"); }
       else if (now - meter.quietSince > 3000) setLevelText("音が聞こえません");
@@ -300,7 +482,7 @@ function stopMeter() {
     meter.ctx.close();
     meter = null;
   }
-  $("level").classList.remove("pulse");
+  $("level").classList.remove("heard");
   $("level").style.width = "0";
   setLevelText("停止中");
 }
@@ -337,8 +519,8 @@ function startRec() {
   };
   // 無音が続くとブラウザが勝手に止めるので、録音中なら自動で再開する
   if (isMobile) {
-    recog.onsoundstart = () => { $("level").classList.add("pulse"); setLevelText("音が入っています"); };
-    recog.onsoundend = () => { $("level").classList.remove("pulse"); setLevelText("待機中"); };
+    recog.onsoundstart = () => { $("level").classList.add("heard"); setLevelText("音が入っています"); };
+    recog.onsoundend = () => { $("level").classList.remove("heard"); setLevelText("待機中"); };
   }
   recog.onend = () => { if (recording) setTimeout(() => { try { recog.start(); } catch (_) {} }, 250); };
   recog.start();
