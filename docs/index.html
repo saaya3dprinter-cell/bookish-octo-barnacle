@@ -118,11 +118,10 @@
     <div class="docBar">
       <input id="docName" placeholder="文字起こしの名前" aria-label="文字起こしの名前">
       <select id="docFolder" aria-label="入れるフォルダ"></select>
-      <button class="small primary" id="saveDoc">💾 保存</button>
       <button class="small" id="newDoc">＋ 新規</button>
     </div>
     <div class="row">
-      <span class="sub" id="docInfo" style="margin:0"></span>
+      <span class="sub" style="margin:0"><span id="docInfo"></span> <span id="saveState"></span></span>
       <div>
         <button class="small" id="copy">コピー</button>
         <button class="small" id="word">Word</button>
@@ -162,7 +161,6 @@
 </main>
 <div id="printArea"></div>
 
-<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
 <script>
 const params = new URLSearchParams(location.search);
@@ -328,12 +326,13 @@ if (!isPhoneMode) try {
 } catch (_) {}
 let storeKey = isPhoneMode ? null : DB_KEY;
 // QRでつないだスマホとのやりとり（PC側: つながっているスマホ / スマホ側: 録音を送る関数）
-const relayConns = new Set();
+let relayRoom = null;        // 中継サーバーとのつながり
+let relayPeerSeen = false;   // PC側: スマホがつながっているか
 let relayTimer = null;
 let relayOpen = null, relayNew = null;  // スマホ側: PCに「開いて」「新しく作って」と頼む
 // PCの一覧と、開いている文字起こしの中身を、つながっているスマホに送る
 function relaySync() {
-  if (isPhoneMode || !relayConns.size || !lib.docs.length) return;
+  if (isPhoneMode || !relayRoom || !relayPeerSeen || !lib.docs.length) return;
   clearTimeout(relayTimer);
   relayTimer = setTimeout(() => {
     const doc = cur();
@@ -343,11 +342,22 @@ function relaySync() {
       docs: lib.docs.map((d) => ({ id: d.id, name: d.name, folderId: d.folderId, createdAt: d.createdAt, updatedAt: d.updatedAt, count: countOf(d) })),
       current: { id: doc.id, entries: doc.entries || [] },
     };
-    for (const c of relayConns) if (c.open) c.send(msg);
+    relayRoom.send(msg);
   }, 300);
 }
+// 保存ボタンはなし。変更があるたびに自動で保存して、状態だけ表示する
+function setSaveState(text) { const el = document.getElementById("saveState"); if (el) el.textContent = text; }
+const hhmm = () => { const d = new Date(); return `${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`; };
 function persist() {
-  if (storeKey) try { localStorage.setItem(storeKey, JSON.stringify(lib)); } catch (_) {}
+  if (storeKey) {
+    try {
+      localStorage.setItem(storeKey, JSON.stringify(lib));
+      if (!cloud.on) setSaveState(`・ ✓ 自動保存 ${hhmm()}`);
+    } catch (_) {
+      setSaveState("・ ⚠ 保存できませんでした（端末の空き容量を確認してください）");
+    }
+  }
+  if (cloud.on) setSaveState("・ ☁ ドライブに保存中…");
   if (cloud.on) cloudChanged();
   relaySync();
 }
@@ -543,20 +553,6 @@ function toast(msg) {
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => { t.hidden = true; }, 2200);
 }
-$("saveDoc").onclick = async () => {
-  const name = $("docName").value.trim();
-  if (name) cur().name = name;
-  cur().updatedAt = Date.now();
-  persist();
-  renderAll();
-  if (cloud.on) {
-    clearTimeout(cloud.pushTimer);
-    await cloudSync();
-    toast(cloud.token ? "Googleドライブに保存しました" : "この端末に保存しました（ドライブはつなぎ直したあとに保存されます）");
-  } else {
-    toast("保存しました");
-  }
-};
 
 function button(label, onclick) {
   const b = document.createElement("button");
@@ -817,7 +813,7 @@ async function cloudStart() {
 
   $("login").hidden = true;
   $("logout").hidden = false;
-  $("accountText").textContent = "👤 " + cloud.email + " ・ ドライブに保存中";
+  $("accountText").textContent = "👤 " + cloud.email;
   $("where").textContent = "Googleドライブの「文字起こし」フォルダに自動で保存されます。同じアカウントのスマホとPCで同じ内容が見られます。";
 
   await cloudPull();
@@ -874,9 +870,11 @@ async function cloudSync() {
   try {
     await cloudPush();
     await cloudPull();
-    $("accountText").textContent = "👤 " + cloud.email + " ・ 保存済み ✓";
+    $("accountText").textContent = "👤 " + cloud.email;
+    setSaveState(`・ ✓ ドライブに自動保存 ${hhmm()}`);
   } catch (e) {
-    if (cloud.token) $("accountText").textContent = "👤 " + cloud.email + " ・ 保存できていません（" + e.message.slice(0, 40) + "）";
+    setSaveState("・ ⚠ ドライブに保存できていません（この端末には保存済み）");
+    if (cloud.token) $("accountText").textContent = "👤 " + cloud.email + " ・ " + e.message.slice(0, 40);
   } finally {
     cloud.busy = false;
     try { localStorage.setItem(storeKey, JSON.stringify({ lib, snap: cloud.snap })); } catch (_) {}
@@ -1422,93 +1420,157 @@ function stopMeter() {
   meter = null;
 }
 
-// ---------------------------------------------------------- スマホ ⇔ PC 接続（WebRTC / PeerJS）
-const PREFIX = "saaya-transcribe-";
+// ---------------------------------------------------------- スマホ ⇔ PC 接続（Cloudflare の中継サーバー経由）
+// PCとスマホが同じ「部屋」（QRコードのID）につなぎ、中継サーバーがメッセージを受け渡す。
+// Wi-Fiやネットの種類に関係なくつながり、切れても自動でつなぎ直す。
+function openRoom(roomId, onMessage, onState) {
+  let ws = null, closed = false, ping = null;
+  const connect = () => {
+    ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/room/${roomId}`);
+    ws.onopen = () => {
+      onState("open");
+      clearInterval(ping);
+      ping = setInterval(() => { if (ws.readyState === 1) ws.send("ping"); }, 25000);
+    };
+    ws.onmessage = (e) => {
+      if (e.data === "pong") return;
+      let msg;
+      try { msg = JSON.parse(e.data); } catch (_) { return; }
+      onMessage(msg);
+    };
+    ws.onclose = () => {
+      clearInterval(ping);
+      onState("closed");
+      if (!closed) setTimeout(connect, 1500);  // 自動でつなぎ直す
+    };
+  };
+  connect();
+  return {
+    get open() { return ws?.readyState === 1; },
+    send(msg) {
+      if (ws?.readyState !== 1) return false;
+      ws.send(JSON.stringify(msg));
+      return true;
+    },
+    close() { closed = true; ws?.close(); },
+  };
+}
+// 録音データは大きいので、小分けにして送る
+const AUDIO_PART = 180_000;
+function b64encode(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+function b64decode(text) {
+  const bin = atob(text);
+  return Uint8Array.from(bin, (c) => c.charCodeAt(0));
+}
 
-if (typeof Peer === "undefined" || typeof qrcode === "undefined") {
-  // 通信用のライブラリが読み込めなくても、このPCだけでの録音はできる
-  $("status").textContent = "スマホ接続の準備ができませんでした（ネット接続を確認して再読み込みしてください）";
+if (typeof qrcode === "undefined" && !isPhoneMode) {
+  $("status").textContent = "QRコードの準備ができませんでした（ネット接続を確認して再読み込みしてください）";
 } else if (!isPhoneMode) {
-  // PC側: 受信の窓口をつくってQRコードを表示
+  // PC側: 部屋をつくってQRコードを表示（再読み込みしても同じQRコードのまま）
   $("pairCard").hidden = false;
-  const id = PREFIX + Math.random().toString(36).slice(2, 10);
-  const peer = new Peer(id);
-  const phoneUrl = location.origin + location.pathname + "?room=" + id.slice(PREFIX.length);
+  let roomId = "";
+  try { roomId = localStorage.getItem("mojiokoshi-room") || ""; } catch (_) {}
+  if (!/^[a-z0-9]{10,32}$/.test(roomId)) {
+    roomId = Array.from(crypto.getRandomValues(new Uint8Array(12)), (n) => "abcdefghijklmnopqrstuvwxyz0123456789"[n % 36]).join("");
+    try { localStorage.setItem("mojiokoshi-room", roomId); } catch (_) {}
+  }
+  const phoneUrl = location.origin + location.pathname + "?room=" + roomId;
   const qr = qrcode(0, "M");
   qr.addData(phoneUrl);
   qr.make();
   $("qr").innerHTML = qr.createImgTag(6, 8);
   $("phoneLink").textContent = phoneUrl;
   $("pairStatus").textContent = "スマホの接続を待っています…";
-  peer.on("connection", (conn) => {
-    conn.on("open", () => {
+  const audioParts = {};
+  relayRoom = openRoom(roomId, (msg) => {
+    if (msg.type === "hello") {
+      relayPeerSeen = true;
       $("pairStatus").textContent = "✅ スマホがつながりました";
-      relayConns.add(conn);
       relaySync();
-    });
-    conn.on("data", (msg) => {
-      // スマホのホーム画面から「この文字起こしを開いて」「新しく作って」
-      if (msg?.type === "open" && lib.docs.some((d) => d.id === msg.id)) { openDoc(msg.id); showView("editor"); }
-      if (msg?.type === "new") { const doc = newDoc(String(msg.folderId || "")); openDoc(doc.id); showView("editor"); }
-      if (msg?.type === "final") { addEntry("スマホ", String(msg.text), Number(msg.at) || Date.now()); setLive(""); }
-      if (msg?.type === "interim") setLive(String(msg.text));
-      if (msg?.type === "audio" && msg.data) {
-        // スマホで録った声を、PCで開いている文字起こしに保存
-        const mime = String(msg.mime || "audio/webm");
-        saveRecordingBlob(cur().id, Number(msg.start) || Date.now(), new Blob([msg.data], { type: mime }), mime, Number(msg.duration) || 0);
+    }
+    if (msg.type === "peer-leave") $("pairStatus").textContent = "スマホの接続が切れました（スマホでページを開き直すと、自動でつながります）";
+    // スマホのホーム画面から「この文字起こしを開いて」「新しく作って」
+    if (msg.type === "open" && lib.docs.some((d) => d.id === msg.id)) { openDoc(msg.id); showView("editor"); relaySync(); }
+    if (msg.type === "new") { const doc = newDoc(String(msg.folderId || "")); openDoc(doc.id); showView("editor"); relaySync(); }
+    if (msg.type === "final") { addEntry("スマホ", String(msg.text), Number(msg.at) || Date.now()); setLive(""); }
+    if (msg.type === "interim") setLive(String(msg.text || ""));
+    if (msg.type === "audio-part") {
+      // スマホで録った声を集めて、PCで開いている文字起こしに保存
+      const box = (audioParts[msg.id] ||= { parts: [], got: 0 });
+      if (msg.meta) box.meta = msg.meta;
+      if (!box.parts[msg.i]) { box.parts[msg.i] = b64decode(msg.data); box.got++; }
+      if (box.got === msg.n && box.meta) {
+        delete audioParts[msg.id];
+        const mime = String(box.meta.mime || "audio/webm");
+        saveRecordingBlob(cur().id, Number(box.meta.start) || Date.now(), new Blob(box.parts, { type: mime }), mime, Number(box.meta.duration) || 0);
+        toast("スマホの録音を保存しました");
       }
-    });
-    conn.on("close", () => {
-      relayConns.delete(conn);
-      $("pairStatus").textContent = "スマホの接続が切れました。もう一度QRコードを読み取ってください。";
-    });
+    }
+  }, (state) => {
+    if (state === "closed") $("pairStatus").textContent = "中継サーバーにつなぎ直しています…";
+    else if (!relayPeerSeen) $("pairStatus").textContent = "スマホの接続を待っています…";
   });
-  peer.on("error", (e) => { $("pairStatus").textContent = "接続の準備でエラー: " + e.type + "（ページを再読み込みしてください）"; });
 } else {
   // スマホ側: PCにつないで、認識した文字と録音を送る（スマホには保存しない）
   document.body.classList.add("relay");
-  for (const el of [$("saveDoc"), $("newDoc"), $("docFolder"), $("clear")]) el.hidden = true;
+  for (const el of [$("newDoc"), $("docFolder"), $("clear"), $("saveState")]) el.hidden = true;
   $("docName").readOnly = true;
   $("docName").value = "（PCにつないでいます…）";
   lib.docs[0].name = "（PCにつないでいます…）";
-  let conn = null;
-  const peer = new Peer();
   const setStatus = (t) => { if (!recording) $("status").textContent = t; };
+  let pcSeen = false, notFound = null;
   setStatus("PCに接続中…");
-  peer.on("open", () => {
-    conn = peer.connect(PREFIX + room, { reliable: true });
-    conn.on("open", () => setStatus("✅ PCにつながりました。録音開始を押して話してください"));
-    conn.on("data", (msg) => {
-      // PCの一覧と、PCで開いている文字起こしをそのまま映す
-      if (msg?.type === "lib") {
-        lib.folders = msg.folders || [];
-        lib.docs = (msg.docs || []).map((d) => ({ ...d, entries: d.id === msg.current.id ? msg.current.entries : null }));
-        lib.currentId = msg.current.id;
-        lib.audios = [];
-        entries = cur().entries || [];
-        renderAll();
-        $("docName").value = "💻 PCの「" + cur().name + "」に送っています";
-      }
-    });
-    relayOpen = (id) => { conn.send({ type: "open", id }); toast("PCで開いています…"); };
-    relayNew = (folderId) => { conn.send({ type: "new", folderId }); toast("PCで新しい文字起こしを作っています…"); };
-    conn.on("close", () => { $("status").textContent = "PCとの接続が切れました。PCのQRコードをもう一度読み取ってください。"; });
+  relayRoom = openRoom(String(room).toLowerCase().replace(/[^a-z0-9]/g, ""), (msg) => {
+    if (msg.type === "peer-join") relayRoom.send({ type: "hello" });  // PCがあとからつないだ
+    if (msg.type === "peer-leave" && pcSeen) {
+      pcSeen = false;
+      setStatus("PCとの接続が切れました。PCでページを開くと、自動でつながります。");
+    }
+    // PCの一覧と、PCで開いている文字起こしをそのまま映す
+    if (msg.type === "lib") {
+      if (!pcSeen) setStatus("✅ PCにつながりました。録音開始を押して話してください");
+      pcSeen = true;
+      clearTimeout(notFound);
+      lib.folders = msg.folders || [];
+      lib.docs = (msg.docs || []).map((d) => ({ ...d, entries: d.id === msg.current.id ? msg.current.entries : null }));
+      lib.currentId = msg.current.id;
+      lib.audios = [];
+      entries = cur().entries || [];
+      renderAll();
+    }
+  }, (state) => {
+    if (state === "open") {
+      relayRoom.send({ type: "hello" });
+      clearTimeout(notFound);
+      notFound = setTimeout(() => { if (!pcSeen) setStatus("PCが見つかりません。PCでこのページを開いたままにして、QRコードを読み取り直してください。"); }, 8000);
+    } else {
+      pcSeen = false;
+      setStatus("つなぎ直しています…");
+    }
   });
-  peer.on("error", (e) => {
-    $("status").textContent = e.type === "peer-unavailable"
-      ? "PCが見つかりません。PCでページを開いたまま、QRコードを読み取り直してください。"
-      : "接続エラー: " + e.type;
-  });
+  relayOpen = (id) => { relayRoom.send({ type: "open", id }); toast("PCで開いています…"); };
+  relayNew = (folderId) => { relayRoom.send({ type: "new", folderId }); toast("PCで新しい文字起こしを作っています…"); };
   onFinal = (text, at = Date.now()) => {
     addEntry("スマホ", text, at);
-    if (conn?.open) conn.send({ type: "final", text, at });
-    else showError("PCとつながっていないため、この文章はPCに届いていません。");
+    if (!relayRoom.send({ type: "final", text, at }) || !pcSeen) showError("PCとつながっていないため、この文章はPCに届いていない可能性があります。");
   };
+  onInterim = (text) => { relayRoom.send({ type: "interim", text }); };
   relaySendAudio = async (blob, start, duration, mime) => {
-    if (!conn?.open) { showError("PCとつながっていないため、録音をPCに送れませんでした。"); return; }
-    conn.send({ type: "audio", start, duration, mime, data: await blob.arrayBuffer() });
+    if (!relayRoom.open) { showError("PCとつながっていないため、録音をPCに送れませんでした。"); return; }
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    const id = uid(), n = Math.max(1, Math.ceil(bytes.length / AUDIO_PART));
+    for (let i = 0; i < n; i++) {
+      relayRoom.send({
+        type: "audio-part", id, i, n,
+        meta: i === 0 ? { start, duration, mime } : undefined,
+        data: b64encode(bytes.subarray(i * AUDIO_PART, (i + 1) * AUDIO_PART)),
+      });
+    }
   };
-  onInterim = (text) => { if (conn?.open) conn.send({ type: "interim", text }); };
 }
 cloudInit();
 </script>

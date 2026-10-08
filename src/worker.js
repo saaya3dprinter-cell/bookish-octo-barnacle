@@ -1,6 +1,7 @@
 // 文字起こしサイトのサーバー部分（Cloudflare Workers）
 // - POST /api/transcribe : 録音した声（WAV）を Cloudflare の AI（Whisper）で文字にする
 // - GET  /api/config     : 画面が使う設定（GoogleログインのクライアントID）
+// - GET  /api/room/:id   : QRコードでつないだPCとスマホの中継（WebSocket。Durable Object の Room が受け渡す）
 // - それ以外             : docs/ の画面をそのまま返す
 //
 // Cloudflare の無料プランでは、1日の無料分を使い切ると AI がエラーを返すだけで課金はされない。
@@ -24,6 +25,11 @@ export default {
     if (url.pathname === "/api/transcribe") return transcribe(request, env);
     // 画面が使う設定（GoogleログインのID。公開して問題ない値）
     if (url.pathname === "/api/config") return json({ googleClientId: env.GOOGLE_CLIENT_ID || "" });
+    const room = url.pathname.match(/^\/api\/room\/([a-z0-9]{6,32})$/);
+    if (room) {
+      if (request.headers.get("Upgrade") !== "websocket") return json({ error: "websocket_required" }, 426);
+      return env.ROOMS.get(env.ROOMS.idFromName(room[1])).fetch(request);
+    }
     if (url.pathname.startsWith("/api/")) return json({ error: "not_found" }, 404);
 
     const res = await env.ASSETS.fetch(request);
@@ -74,4 +80,39 @@ function json(data, status = 200) {
     status,
     headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" },
   });
+}
+
+// ---------------------------------------------------------------- PC ⇔ スマホの中継
+// 同じ部屋（QRコードのID）につないだ相手に、届いたメッセージをそのまま渡すだけ。何も保存しない。
+export class Room {
+  constructor(ctx) {
+    this.ctx = ctx;
+  }
+
+  async fetch() {
+    const { 0: client, 1: server } = new WebSocketPair();
+    this.ctx.acceptWebSocket(server);
+    this.broadcast(server, JSON.stringify({ type: "peer-join" }));
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  webSocketMessage(ws, message) {
+    if (message === "ping") return ws.send("pong");  // 接続を保つための合図
+    this.broadcast(ws, message);
+  }
+
+  webSocketClose(ws) {
+    this.broadcast(ws, JSON.stringify({ type: "peer-leave" }));
+  }
+
+  webSocketError(ws) {
+    this.webSocketClose(ws);
+  }
+
+  broadcast(from, message) {
+    for (const ws of this.ctx.getWebSockets()) {
+      if (ws === from) continue;
+      try { ws.send(message); } catch (_) {}
+    }
+  }
 }

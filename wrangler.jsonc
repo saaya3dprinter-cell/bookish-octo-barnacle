@@ -16,6 +16,11 @@
   "ai": {
     "binding": "AI"
   },
+  // QRコードでつないだPCとスマホの中継（無料プランで使える SQLite 版の Durable Object）
+  "durable_objects": {
+    "bindings": [{ "name": "ROOMS", "class_name": "Room" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }],
   "vars": {
     // Google Cloud で作った「OAuth クライアントID」（公開して問題ない値）。空のあいだはログインボタンが出ない
     "GOOGLE_CLIENT_ID": "174450966806-r2l88c44o1vkg531t4m9q8dfmr5ulub0.apps.googleusercontent.com"
