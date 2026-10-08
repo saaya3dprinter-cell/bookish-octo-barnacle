@@ -1,5 +1,6 @@
 // 文字起こしサイトのサーバー部分（Cloudflare Workers）
 // - POST /api/transcribe : 録音した声（WAV）を Cloudflare の AI（Whisper）で文字にする
+// - GET  /api/config     : 画面が使う設定（GoogleログインのクライアントID）
 // - それ以外             : docs/ の画面をそのまま返す
 //
 // Cloudflare の無料プランでは、1日の無料分を使い切ると AI がエラーを返すだけで課金はされない。
@@ -21,6 +22,8 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === "/api/transcribe") return transcribe(request, env);
+    // 画面が使う設定（GoogleログインのID。公開して問題ない値）
+    if (url.pathname === "/api/config") return json({ googleClientId: env.GOOGLE_CLIENT_ID || "" });
     if (url.pathname.startsWith("/api/")) return json({ error: "not_found" }, 404);
 
     const res = await env.ASSETS.fetch(request);

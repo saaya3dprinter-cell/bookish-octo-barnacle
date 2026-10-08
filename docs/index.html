@@ -71,7 +71,15 @@
 </head>
 <body>
 <main>
-  <h1>🎙 音声文字起こし</h1>
+  <div class="row">
+    <h1>🎙 音声文字起こし</h1>
+    <div id="account" class="sub" style="margin:0" hidden>
+      <span id="accountText"></span>
+      <button class="small primary" id="login">Googleでログイン</button>
+      <button class="small" id="logout" hidden>ログアウト</button>
+    </div>
+  </div>
+  <div class="warn" id="cloudNotice" hidden></div>
   <div class="sub" id="where"></div>
   <div class="warn" id="unsupported" hidden>
     このブラウザには「ブラウザ（簡易）」の音声認識がありません。「AI（高精度）」を使ってください。
@@ -143,6 +151,7 @@ $("where").textContent = isPhoneMode
 // ---------------------------------------------------------- 保存データ（フォルダ・文字起こし）
 // { folders:[{id,name}], docs:[{id,name,folderId,createdAt,updatedAt,entries:[{time,source,text}]}], currentId }
 const DB_KEY = "mojiokoshi-library-v1";
+const cloud = { on: false };  // Googleドライブ保存（下のほうで設定）
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 let lib = null;
 try { lib = JSON.parse(localStorage.getItem(DB_KEY) || "null"); } catch (_) {}
@@ -155,7 +164,11 @@ try {
     localStorage.removeItem("transcripts-v1");
   }
 } catch (_) {}
-function persist() { try { localStorage.setItem(DB_KEY, JSON.stringify(lib)); } catch (_) {} }
+let storeKey = DB_KEY;  // Googleにログイン中は、その人用のキャッシュに切り替わる
+function persist() {
+  try { localStorage.setItem(storeKey, JSON.stringify(lib)); } catch (_) {}
+  if (cloud.on) cloudChanged();
+}
 
 function defaultName() {
   const d = new Date();
@@ -171,16 +184,27 @@ function newDoc(folderId = "") {
 function cur() {
   return lib.docs.find((d) => d.id === lib.currentId) || lib.docs[lib.docs.length - 1] || newDoc();
 }
-let entries = cur().entries;
 lib.currentId = cur().id;
+if (!cur().entries) cur().entries = [];
+let entries = cur().entries;
 
 function openDoc(id) {
   lib.currentId = id;
-  entries = cur().entries;
+  const doc = cur();
+  if (!doc.entries) {
+    // ドライブから中身をまだ読み込んでいない
+    doc.entries = [];
+    entries = doc.entries;
+    renderAll();
+    cloudLoadDoc(doc).then(renderAll);
+    return;
+  }
+  entries = doc.entries;
   persist();
   setLive("");
   renderAll();
 }
+const countOf = (d) => (d.entries ? d.entries.length : d.count || 0);
 function folderName(id) {
   return lib.folders.find((f) => f.id === id)?.name || "未分類";
 }
@@ -257,7 +281,7 @@ function renderLibrary() {
       open.textContent = d.name;
       const info = document.createElement("div");
       info.className = "info";
-      info.textContent = `${fmtDate(d.updatedAt)} ・ ${d.entries.length}件` + (d.id === lib.currentId ? " ・ 表示中" : "");
+      info.textContent = `${fmtDate(d.updatedAt)} ・ ${countOf(d)}件` + (d.id === lib.currentId ? " ・ 表示中" : "");
       open.append(info);
       open.onclick = () => { openDoc(d.id); window.scrollTo({ top: 0, behavior: "smooth" }); };
       const move = document.createElement("select");
@@ -267,9 +291,9 @@ function renderLibrary() {
         if (move.value !== "__") { d.folderId = move.value; persist(); renderAll(); }
       };
       item.append(open, move, button("削除", () => {
-        if (!confirm(`「${d.name}」を削除しますか？（元に戻せません）`)) return;
+        if (!confirm(cloud.on ? `「${d.name}」を削除しますか？（Googleドライブのゴミ箱に移ります）` : `「${d.name}」を削除しますか？（元に戻せません）`)) return;
         lib.docs = lib.docs.filter((x) => x !== d);
-        if (lib.currentId === d.id) { lib.currentId = null; entries = cur().entries; lib.currentId = cur().id; }
+        if (lib.currentId === d.id) { lib.currentId = null; openDoc(cur().id); }
         persist(); renderAll();
       }));
       box.append(item);
@@ -438,6 +462,350 @@ $("clear").onclick = () => {
   if (confirm(`「${cur().name}」の中身を全部消しますか？`)) { entries.length = 0; persist(); renderAll(); }
 };
 
+// ---------------------------------------------------------- Googleドライブに保存（各自のドライブ）
+// ログインすると、文字起こしが自分のGoogleドライブの「文字起こし」フォルダに Googleドキュメントとして保存される。
+// 同じアカウントでログインしたスマホとPCは、数秒ごとにドライブを見て同じ内容になる。
+const GAPI = "https://www.googleapis.com";
+const SCOPE = "https://www.googleapis.com/auth/drive.file openid email";
+const DOC_MIME = "application/vnd.google-apps.document";
+const FOLDER_MIME = "application/vnd.google-apps.folder";
+Object.assign(cloud, {
+  tokenClient: null, token: null, exp: 0, email: "", rootId: null,
+  snap: { folders: {}, docs: {} },  // 最後にドライブと同じだった状態
+  pushTimer: null, pollTimer: null, busy: false, again: false, localLib: null,
+});
+
+async function cloudInit() {
+  let clientId = "";
+  try { clientId = (await (await fetch("/api/config")).json()).googleClientId || ""; } catch (_) {}
+  if (!clientId || isPhoneModeOnlyRelay()) return;
+  $("account").hidden = false;
+  await loadScript("https://accounts.google.com/gsi/client").catch(() => null);
+  if (!window.google?.accounts?.oauth2) { $("account").hidden = true; return; }
+  cloud.tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: clientId,
+    scope: SCOPE,
+    callback: onGoogleToken,
+    error_callback: (e) => cloudNotice("Googleログインできませんでした: " + (e?.message || e?.type || "")),
+  });
+  $("login").onclick = () => cloud.tokenClient.requestAccessToken({ prompt: cloud.email ? "" : "select_account" });
+  $("logout").onclick = cloudLogout;
+  try { if (localStorage.getItem("mojiokoshi-google")) $("login").textContent = "Googleドライブにつなぐ"; } catch (_) {}
+}
+// QRコードで開いた「マイク役」のスマホは、PCに文字を送るだけなのでログイン不要
+function isPhoneModeOnlyRelay() { return isPhoneMode; }
+
+function cloudNotice(msg, actionLabel, action) {
+  const box = $("cloudNotice");
+  box.replaceChildren(document.createTextNode(msg));
+  if (actionLabel) {
+    const b = button(actionLabel, () => { box.hidden = true; action(); });
+    b.style.marginLeft = "8px";
+    box.append(b);
+  }
+  box.hidden = !msg;
+}
+
+async function onGoogleToken(resp) {
+  if (resp.error) { cloudNotice("Googleログインできませんでした: " + resp.error); return; }
+  cloud.token = resp.access_token;
+  cloud.exp = Date.now() + (Number(resp.expires_in) || 3600) * 1000 - 60_000;
+  cloudNotice("");
+  if (cloud.on) { cloudSync(); return; }  // 再接続
+  try {
+    const me = await gfetch("/oauth2/v3/userinfo");
+    cloud.email = me.email || "";
+    await cloudStart();
+  } catch (e) {
+    cloudNotice("Googleドライブにつなげませんでした: " + e.message);
+  }
+}
+
+async function gfetch(path, opts = {}) {
+  if (!cloud.token || Date.now() > cloud.exp) { cloudNeedLogin(); throw new Error("ログインが切れました"); }
+  const res = await fetch(path.startsWith("http") ? path : GAPI + path, {
+    ...opts,
+    headers: { Authorization: "Bearer " + cloud.token, ...(opts.headers || {}) },
+  });
+  if (res.status === 401) { cloud.token = null; cloudNeedLogin(); throw new Error("ログインが切れました"); }
+  if (!res.ok) throw new Error(`Google ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  const type = res.headers.get("content-type") || "";
+  return type.includes("json") ? res.json() : res.text();
+}
+function cloudNeedLogin() {
+  cloudNotice("Googleドライブとの接続が切れました。押すとつなぎ直して保存を続けます（それまではこの端末に保存されます）。",
+    "つなぎ直す", () => cloud.tokenClient.requestAccessToken({ prompt: "" }));
+}
+const q = (s) => encodeURIComponent(s);
+
+async function cloudStart() {
+  // ドライブに「文字起こし」フォルダを用意
+  const found = await gfetch(`/drive/v3/files?q=${q("trashed=false and appProperties has { key='mojiokoshi' and value='root' }")}&fields=files(id)`);
+  cloud.rootId = found.files[0]?.id || (await gfetch("/drive/v3/files?fields=id", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: "文字起こし", mimeType: FOLDER_MIME, appProperties: { mojiokoshi: "root" } }),
+  })).id;
+
+  // この端末だけの保存から、その人のドライブ用に切り替える
+  cloud.localLib = lib;
+  storeKey = "mojiokoshi-cloud-" + cloud.email;
+  let cached = null;
+  try { cached = JSON.parse(localStorage.getItem(storeKey) || "null"); } catch (_) {}
+  lib = cached?.lib || { folders: [], docs: [], currentId: null };
+  cloud.snap = cached?.snap || { folders: {}, docs: {} };
+  cloud.on = true;
+  try { localStorage.setItem("mojiokoshi-google", "1"); } catch (_) {}
+
+  $("login").hidden = true;
+  $("logout").hidden = false;
+  $("accountText").textContent = "👤 " + cloud.email + " ・ ドライブに保存中";
+  $("where").textContent = "Googleドライブの「文字起こし」フォルダに自動で保存されます。同じアカウントのスマホとPCで同じ内容が見られます。";
+
+  await cloudPull();
+
+  // ログイン前にこの端末に保存していた分をドライブに移す（1回だけ聞く）
+  const flag = "mojiokoshi-moved-" + cloud.email;
+  const localDocs = cloud.localLib.docs.filter((d) => d.entries?.length);
+  let asked = false;
+  try { asked = !!localStorage.getItem(flag); } catch (_) {}
+  if (localDocs.length && !asked) {
+    try { localStorage.setItem(flag, "1"); } catch (_) {}
+    if (confirm(`この端末に保存してある ${localDocs.length}件 の文字起こしを、Googleドライブに移しますか？`)) {
+      const map = {};
+      for (const f of cloud.localLib.folders) {
+        const nf = { id: uid(), name: f.name };
+        map[f.id] = nf.id;
+        lib.folders.push(nf);
+      }
+      for (const d of localDocs) lib.docs.push({ ...d, id: uid(), folderId: map[d.folderId] || "" });
+    }
+  }
+  if (!lib.docs.length) newDoc();
+  if (!lib.docs.some((d) => d.id === lib.currentId)) lib.currentId = lib.docs[0].id;
+  cloud.started = true;
+  openDoc(lib.currentId);
+  persist();
+  clearInterval(cloud.pollTimer);
+  cloud.pollTimer = setInterval(() => { if (!document.hidden) cloudSync(); }, 5000);
+}
+
+function cloudLogout() {
+  try { google.accounts.oauth2.revoke(cloud.token, () => {}); } catch (_) {}
+  try { localStorage.removeItem("mojiokoshi-google"); } catch (_) {}
+  clearInterval(cloud.pollTimer);
+  Object.assign(cloud, { on: false, token: null, email: "" });
+  lib = cloud.localLib || lib;
+  storeKey = DB_KEY;
+  $("login").hidden = false;
+  $("login").textContent = "Googleでログイン";
+  $("logout").hidden = true;
+  $("accountText").textContent = "";
+  openDoc(cur().id);
+}
+
+// 変更があったら少し待ってからドライブに保存（話している間に何度も送らないように）
+function cloudChanged() {
+  clearTimeout(cloud.pushTimer);
+  cloud.pushTimer = setTimeout(cloudSync, 1200);
+}
+async function cloudSync() {
+  if (!cloud.on || !cloud.token) return;
+  if (cloud.busy) { cloud.again = true; return; }
+  cloud.busy = true;
+  try {
+    await cloudPush();
+    await cloudPull();
+    $("accountText").textContent = "👤 " + cloud.email + " ・ 保存済み ✓";
+  } catch (e) {
+    if (cloud.token) $("accountText").textContent = "👤 " + cloud.email + " ・ 保存できていません（" + e.message.slice(0, 40) + "）";
+  } finally {
+    cloud.busy = false;
+    try { localStorage.setItem(storeKey, JSON.stringify({ lib, snap: cloud.snap })); } catch (_) {}
+    if (cloud.again) { cloud.again = false; cloudChanged(); }
+  }
+}
+
+// ---- ドキュメントの中身（1行 = [時刻] (PC/スマホ) 文章）
+const sig = (list) => list.length + ":" + JSON.stringify(list).length;
+function toText(list) {
+  return list.map((e) => `[${e.time}] (${e.source}) ${e.text}`).join("\n");
+}
+function fromText(text) {
+  return text.replace(/^﻿/, "").split(/\r?\n/).map((line) => {
+    const m = line.match(/^\[(.+?)\] \((.+?)\) (.*)$/);
+    return m ? { time: m[1], source: m[2], text: m[3] } : line.trim() ? { time: "", source: "", text: line.trim() } : null;
+  }).filter(Boolean);
+}
+function mergeEntries(remote, local) {
+  const key = (e) => `${e.time}|${e.source}|${e.text}`;
+  const seen = new Set(remote.map(key));
+  return [...remote, ...local.filter((e) => !seen.has(key(e)))];
+}
+async function cloudLoadDoc(doc) {
+  try {
+    const text = await gfetch(`/drive/v3/files/${doc.id}/export?mimeType=text/plain`);
+    const remote = fromText(text);
+    const merged = mergeEntries(remote, doc.entries || []);
+    doc.entries = merged;
+    if (doc.id === lib.currentId) entries = doc.entries;
+    const s = cloud.snap.docs[doc.id];
+    if (s) s.sig = sig(remote);
+  } catch (e) {
+    cloudNotice("ドライブから読み込めませんでした: " + e.message);
+  }
+}
+function multipart(meta, text) {
+  const boundary = "mojiokoshi" + Math.random().toString(36).slice(2);
+  const body = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n` +
+    `--${boundary}\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n${text}\r\n--${boundary}--`;
+  return { body, headers: { "Content-Type": "multipart/related; boundary=" + boundary } };
+}
+const parentOf = (folderId) => folderId || cloud.rootId;
+
+// ---- この端末の変更をドライブへ
+async function cloudPush() {
+  const snap = cloud.snap;
+  // 新しいフォルダ・名前変更
+  for (const f of lib.folders) {
+    const s = snap.folders[f.id];
+    if (!s) {
+      const created = await gfetch("/drive/v3/files?fields=id", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: f.name, mimeType: FOLDER_MIME, parents: [cloud.rootId], appProperties: { mojiokoshi: "folder" } }),
+      });
+      lib.docs.forEach((d) => { if (d.folderId === f.id) d.folderId = created.id; });
+      f.id = created.id;
+      snap.folders[f.id] = { name: f.name };
+    } else if (s.name !== f.name) {
+      await gfetch(`/drive/v3/files/${f.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: f.name }) });
+      s.name = f.name;
+    }
+  }
+  // 文字起こし
+  for (const d of lib.docs) {
+    const s = snap.docs[d.id];
+    if (!s) {
+      const meta = {
+        name: d.name, mimeType: DOC_MIME, parents: [parentOf(d.folderId)],
+        appProperties: { mojiokoshi: "doc", createdAt: String(d.createdAt), count: String(d.entries.length) },
+      };
+      const mp = multipart(meta, toText(d.entries));
+      const created = await gfetch("/upload/drive/v3/files?uploadType=multipart&fields=id,modifiedTime", { method: "POST", ...mp });
+      if (lib.currentId === d.id) lib.currentId = created.id;
+      d.id = created.id;
+      snap.docs[d.id] = { name: d.name, folderId: d.folderId, sig: sig(d.entries), modified: created.modifiedTime };
+      continue;
+    }
+    const metaChanged = s.name !== d.name || s.folderId !== d.folderId;
+    const bodyChanged = d.entries && s.sig !== sig(d.entries);
+    if (!metaChanged && !bodyChanged) continue;
+
+    let url = `/drive/v3/files/${d.id}?fields=id,modifiedTime`;
+    if (s.folderId !== d.folderId) url += `&addParents=${parentOf(d.folderId)}&removeParents=${parentOf(s.folderId)}`;
+    const meta = { name: d.name };
+    let res;
+    if (bodyChanged) {
+      // 別の端末が先に書いていたら、その分を取り込んでから保存（どちらの文章も消えないように）
+      const remote = await gfetch(`/drive/v3/files/${d.id}?fields=modifiedTime`);
+      if (remote.modifiedTime !== s.modified) await cloudLoadDoc(d);
+      meta.appProperties = { count: String(d.entries.length) };
+      const mp = multipart(meta, toText(d.entries));
+      res = await gfetch(url.replace("/drive/v3/", "/upload/drive/v3/") + "&uploadType=multipart", { method: "PATCH", ...mp });
+      s.sig = sig(d.entries);
+    } else {
+      res = await gfetch(url, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(meta) });
+    }
+    s.name = d.name;
+    s.folderId = d.folderId;
+    s.modified = res.modifiedTime;
+  }
+  // 削除（ドライブのゴミ箱へ）
+  const trash = (id) => gfetch(`/drive/v3/files/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ trashed: true }) });
+  for (const id of Object.keys(snap.docs)) {
+    if (!lib.docs.some((d) => d.id === id)) { await trash(id).catch(() => {}); delete snap.docs[id]; }
+  }
+  for (const id of Object.keys(snap.folders)) {
+    if (!lib.folders.some((f) => f.id === id)) { await trash(id).catch(() => {}); delete snap.folders[id]; }
+  }
+}
+
+// ---- ドライブの変更（別の端末で録音した分など）をこの端末へ
+async function cloudPull() {
+  const query = "trashed=false and (appProperties has { key='mojiokoshi' and value='doc' } or appProperties has { key='mojiokoshi' and value='folder' })";
+  const list = await gfetch(`/drive/v3/files?q=${q(query)}&pageSize=1000&fields=files(id,name,mimeType,parents,modifiedTime,appProperties)`);
+  const snap = cloud.snap;
+  const remoteFolders = list.files.filter((f) => f.mimeType === FOLDER_MIME);
+  const remoteDocs = list.files.filter((f) => f.mimeType === DOC_MIME);
+  let changed = false;
+
+  for (const rf of remoteFolders) {
+    const f = lib.folders.find((x) => x.id === rf.id);
+    if (!f) { lib.folders.push({ id: rf.id, name: rf.name }); changed = true; }
+    else if (f.name !== rf.name && snap.folders[rf.id]?.name === f.name) { f.name = rf.name; changed = true; }
+    snap.folders[rf.id] = { name: rf.name };
+  }
+  for (const f of [...lib.folders]) {
+    if (snap.folders[f.id] && !remoteFolders.some((r) => r.id === f.id)) {
+      lib.folders = lib.folders.filter((x) => x !== f);
+      lib.docs.forEach((d) => { if (d.folderId === f.id) d.folderId = ""; });
+      delete snap.folders[f.id];
+      changed = true;
+    }
+  }
+
+  for (const rd of remoteDocs) {
+    const folderId = rd.parents?.[0] && rd.parents[0] !== cloud.rootId ? rd.parents[0] : "";
+    const updatedAt = Date.parse(rd.modifiedTime);
+    const count = Number(rd.appProperties?.count) || 0;
+    let d = lib.docs.find((x) => x.id === rd.id);
+    const s = snap.docs[rd.id];
+    if (!d) {
+      d = { id: rd.id, name: rd.name, folderId, createdAt: Number(rd.appProperties?.createdAt) || updatedAt, updatedAt, entries: null, count };
+      lib.docs.push(d);
+      snap.docs[rd.id] = { name: rd.name, folderId, sig: "", modified: rd.modifiedTime };
+      changed = true;
+      continue;
+    }
+    if (s && s.modified === rd.modifiedTime) continue;
+    // 別の端末で変更された
+    if (!s || s.name === d.name) d.name = rd.name;
+    if (!s || s.folderId === d.folderId) d.folderId = folderId;
+    d.updatedAt = updatedAt;
+    d.count = count;
+    const localUnsaved = d.entries && s && s.sig !== sig(d.entries);
+    snap.docs[rd.id] = { name: rd.name, folderId, sig: s?.sig || "", modified: rd.modifiedTime };
+    if (d.id === lib.currentId) {
+      await cloudLoadDoc(d);
+      if (localUnsaved) snap.docs[rd.id].sig = "";  // 取り込んだうえで、こちらの分もあとで保存
+    } else if (!localUnsaved) {
+      d.entries = null;  // 開いたときに読み込み直す
+    }
+    if (d.id !== lib.currentId && !recording) showRemoteUpdate(d);
+    changed = true;
+  }
+  for (const d of [...lib.docs]) {
+    if (snap.docs[d.id] && !remoteDocs.some((r) => r.id === d.id)) {
+      lib.docs = lib.docs.filter((x) => x !== d);
+      delete snap.docs[d.id];
+      changed = true;
+    }
+  }
+  if (!lib.docs.length && cloud.started) newDoc();
+  if (changed && lib.docs.length) {
+    if (!lib.docs.some((d) => d.id === lib.currentId)) lib.currentId = lib.docs[0].id;
+    if (!cur().entries) await cloudLoadDoc(cur());
+    entries = cur().entries;
+    try { localStorage.setItem(storeKey, JSON.stringify({ lib, snap })); } catch (_) {}
+    renderAll();
+  }
+}
+// 別の端末（スマホなど）で更新された文字起こしをお知らせ
+function showRemoteUpdate(d) {
+  cloudNotice(`📱 別の端末で「${d.name}」が更新されました。`, "開く", () => { openDoc(d.id); window.scrollTo({ top: 0 }); });
+}
+
 // ---------------------------------------------------------- 録音の共通部分
 // 文字にする方法は2つ
 //   ai      : 録音した声を Cloudflare の AI（Whisper）に送る。高精度・どのブラウザでもOK・スマホで音が鳴らない
@@ -445,7 +813,7 @@ $("clear").onclick = () => {
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 let recording = false, wakeLock = null;
-let onFinal = (text) => addEntry("PC", text);
+let onFinal = (text) => addEntry(isMobile ? "スマホ" : "PC", text);
 let onInterim = () => {};
 let engine = "ai";
 try { engine = localStorage.getItem("mojiokoshi-engine") || "ai"; } catch (_) {}
@@ -773,6 +1141,7 @@ if (typeof Peer === "undefined" || typeof qrcode === "undefined") {
   };
   onInterim = (text) => { if (conn?.open) conn.send({ type: "interim", text }); };
 }
+cloudInit();
 </script>
 </body>
 </html>

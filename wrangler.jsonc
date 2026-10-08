@@ -15,5 +15,9 @@
   // Cloudflare の AI（Whisper）を使う。無料プランなら無料分を超えても課金されずエラーになるだけ
   "ai": {
     "binding": "AI"
+  },
+  "vars": {
+    // Google Cloud で作った「OAuth クライアントID」（公開して問題ない値）。空のあいだはログインボタンが出ない
+    "GOOGLE_CLIENT_ID": ""
   }
 }
