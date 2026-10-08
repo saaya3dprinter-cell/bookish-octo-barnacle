@@ -7,6 +7,8 @@
   "compatibility_date": "2025-09-01",
   // workers.dev のURLで公開する
   "workers_dev": true,
+  // 自分のドメインでも公開する（saaya3dprint.com の中の mojiokoshi サブドメイン）
+  "routes": [{ "pattern": "mojiokoshi.saaya3dprint.com", "custom_domain": true }],
   "assets": {
     "directory": "./docs",
     "binding": "ASSETS",
