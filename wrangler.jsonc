@@ -1,0 +1,8 @@
+{
+  // Cloudflare Workers の設定。docs/ の中身をそのままサイトとして公開する
+  "name": "mojiokoshi",
+  "compatibility_date": "2025-09-01",
+  "assets": {
+    "directory": "./docs"
+  }
+}
