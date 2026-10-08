@@ -64,7 +64,12 @@ async function transcribe(request, env) {
     });
     let text = String(result?.text || "").trim();
     if (HALLUCINATIONS.some((h) => text.includes(h)) && text.length < 30) text = "";
-    return json({ text });
+    // 単語（なければ区切り）ごとの「何秒目に話したか」。話者を分けるときに、行の途中で人が変わったら分けるのに使う
+    const words = text ? (result?.segments || []).flatMap((seg) =>
+      seg.words?.length ? seg.words.map((w) => [String(w.word ?? ""), round(w.start), round(w.end)])
+        : [[String(seg.text ?? ""), round(seg.start), round(seg.end)]],
+    ).filter((w) => w[0] && Number.isFinite(w[1])) : [];
+    return json({ text, words });
   } catch (e) {
     const message = String(e?.message || e);
     // 1日の無料分を使い切ったとき（課金はされず、エラーになる）
@@ -242,6 +247,8 @@ function page(message, back) {
     status: 400, headers: { "Content-Type": "text/html; charset=utf-8" },
   });
 }
+
+const round = (n) => Math.round(Number(n) * 100) / 100;
 
 function toBase64(bytes) {
   let bin = "";

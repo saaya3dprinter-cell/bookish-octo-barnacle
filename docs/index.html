@@ -53,6 +53,8 @@
   .audioItem audio { height:36px; flex:1; min-width:220px; }
   #transcript p.seek { cursor:pointer; }
   .tag.speaker { cursor:pointer; font-weight:700; font-size:.8rem; }
+  .swap { border:1px solid #ccc; background:var(--card); color:var(--muted); border-radius:6px; padding:0 5px;
+          margin-left:3px; font-size:.75rem; cursor:pointer; line-height:1.4; }
   #transcript p.seek:hover { background:rgba(255,122,26,.08); border-radius:6px; }
   #transcript p.seek .meta::before { content:"▶ "; }
   .folder { margin-top:14px; }
@@ -269,26 +271,94 @@ function assignSpeakers(a, words) {
   // 話した順に A, B, C…
   const letters = {};
   for (const w of words) if (!(w.sp in letters)) letters[w.sp] = String.fromCharCode(65 + Object.keys(letters).length);
-  const rows = doc.entries.map((e) => ({ e, o: offsetIn(a, e.time) })).filter((r) => r.o !== null).sort((x, y) => x.o - y.o);
-  const names = {};  // 前に付けた名前は残す
-  for (const { e } of rows) if (e.speaker && e.speakerName) names[e.speaker] = e.speakerName;
-  rows.forEach((r, i) => {
-    const end = rows[i + 1]?.o ?? a.duration + 1;
+  // ある時間に話していた人（重なりが一番長い人。だれとも重ならなければ一番近い人）
+  const who = (from, to) => {
     const talk = {};
     for (const w of words) {
-      const overlap = Math.min(end, w.e) - Math.max(r.o, w.s);
+      const overlap = Math.min(to, w.e) - Math.max(from, w.s);
       if (overlap > 0) talk[w.sp] = (talk[w.sp] || 0) + overlap;
     }
     const best = Object.entries(talk).sort((x, y) => y[1] - x[1])[0];
-    if (!best) return;
-    r.e.speaker = letters[best[0]];
-    if (names[r.e.speaker]) r.e.speakerName = names[r.e.speaker]; else delete r.e.speakerName;
-  });
+    if (best) return letters[best[0]];
+    let near = null, dist = Infinity;
+    for (const w of words) {
+      const d = Math.min(Math.abs(w.s - to), Math.abs(w.e - from));
+      if (d < dist) { dist = d; near = w; }
+    }
+    return near && dist < 3 ? letters[near.sp] : null;
+  };
+  const names = {};  // 前に付けた名前は残す
+  const inRec = doc.entries.filter((e) => offsetIn(a, e.time) !== null);
+  for (const e of inRec) if (e.speaker && e.speakerName) names[e.speaker] = e.speakerName;
+  const timeAt = (sec) => new Date(a.start + sec * 1000).toLocaleTimeString("ja-JP");
+
+  const out = [];
+  for (const e of doc.entries) {
+    const o = offsetIn(a, e.time);
+    if (o === null) { out.push(e); continue; }
+    if (e.w?.length) {
+      // 単語ごとに話者を決めて、話者が変わるところで行を分ける
+      const groups = [];
+      let last = null;
+      for (const [t, s0, e0] of e.w) {
+        const sp = who(o + s0, o + (Number.isFinite(e0) ? e0 : s0 + 0.3)) || last;
+        if (!groups.length || sp !== groups[groups.length - 1].sp) groups.push({ sp, words: [] });
+        groups[groups.length - 1].words.push([t, s0, e0]);
+        last = sp;
+      }
+      // 1〜2単語だけのかけらは、前の人の行にくっつける（誤判定で細切れにならないように）
+      const merged = [];
+      for (const g of groups) {
+        const short = g.words.map((w) => w[0]).join("").trim().length <= 2;
+        if (merged.length && (short || g.sp === null || g.sp === merged[merged.length - 1].sp)) merged[merged.length - 1].words.push(...g.words);
+        else merged.push(g);
+      }
+      for (const g of merged) {
+        const first = g.words[0][1];
+        const piece = {
+          time: merged.length > 1 ? timeAt(o + first) : e.time,
+          source: e.source,
+          text: g.words.map((w) => w[0]).join("").trim(),
+          w: g.words.map(([t, s0, e0]) => [t, Math.round((s0 - first) * 100) / 100, Math.round((e0 - first) * 100) / 100]),
+        };
+        if (!piece.text) continue;
+        if (g.sp) piece.speaker = g.sp;
+        if (g.sp && names[g.sp]) piece.speakerName = names[g.sp];
+        out.push(piece);
+      }
+      continue;
+    }
+    // 単語の時間がない行は、その行で一番長く話した人にする
+    const next = inRec.map((x) => offsetIn(a, x.time)).filter((x) => x > o).sort((x, y) => x - y)[0];
+    const sp = who(o, next ?? a.duration + 1);
+    if (sp) { e.speaker = sp; if (names[sp]) e.speakerName = names[sp]; else delete e.speakerName; }
+    out.push(e);
+  }
+  doc.entries.splice(0, doc.entries.length, ...out);
   doc.updatedAt = Date.now();
   doc.dirty = true;
   persist();
   render();
-  toast(`話した人を分けました（${Object.keys(letters).length}人）。A・Bなどを押すと名前を変えられます`);
+  const count = Object.keys(letters).length;
+  toast(count > 1
+    ? `話した人を分けました（${count}人）。A・Bを押すと名前、⇄で話者を変えられます`
+    : "1人の声と判断されました。違うときは、行の ⇄ で話者を切り替えられます");
+}
+// 1行だけ、話者を切り替える（A → B → C → … → A）
+function cycleSpeaker(e, a) {
+  const doc = cur();
+  const same = a ? doc.entries.filter((x) => offsetIn(a, x.time) !== null) : doc.entries;
+  const keys = [...new Set(same.map((x) => x.speaker).filter(Boolean))].sort();
+  const extra = String.fromCharCode(65 + keys.length);  // 新しい人も選べるように
+  const options = [...keys, extra];
+  const next = options[(options.indexOf(e.speaker) + 1) % options.length];
+  e.speaker = next;
+  const name = same.find((x) => x !== e && x.speaker === next && x.speakerName)?.speakerName;
+  if (name) e.speakerName = name; else delete e.speakerName;
+  doc.updatedAt = Date.now();
+  doc.dirty = true;
+  persist();
+  render();
 }
 // 録音ごとに、話者の名前を付け替える
 function renameSpeaker(a, key) {
@@ -539,6 +609,7 @@ function render() {
     meta.textContent = e.time;
     const hit = findAudioAt(e.time);
     const tag = document.createElement("span");
+    let swap = null;
     if (e.speaker) {
       // 話者（押すと名前を変えられる）
       tag.className = "tag speaker";
@@ -546,11 +617,19 @@ function render() {
       tag.textContent = speakerLabel(e);
       tag.title = "押すと名前を変えられます";
       tag.onclick = (ev) => { ev.stopPropagation(); if (!isPhoneMode) renameSpeaker(hit?.audio, e.speaker); };
+      if (!isPhoneMode) {
+        swap = document.createElement("button");
+        swap.className = "swap";
+        swap.textContent = "⇄";
+        swap.title = "この行の話者を切り替える";
+        swap.onclick = (ev) => { ev.stopPropagation(); cycleSpeaker(e, hit?.audio); };
+      }
     } else {
       tag.className = "tag" + (e.source === "スマホ" ? " phone" : "");
       tag.textContent = e.source;
     }
     meta.append(tag);
+    if (swap) meta.append(swap);
     para.append(meta, document.createTextNode(e.text));
     if (hit) {
       para.className = "seek";
@@ -751,10 +830,13 @@ function scrollToEnd() {
   const box = $("transcript");
   box.scrollTop = box.scrollHeight;
 }
-function addEntry(source, text, at = Date.now()) {
+// words: [[単語, 何秒目から, 何秒目まで], …]（行の最初からの秒数。話者を分けるときに使う）
+function addEntry(source, text, at = Date.now(), words) {
   text = text.trim();
   if (!text) return;
-  entries.push({ time: new Date(at).toLocaleTimeString("ja-JP"), source, text });
+  const e = { time: new Date(at).toLocaleTimeString("ja-JP"), source, text };
+  if (Array.isArray(words) && words.length) e.w = words;
+  entries.push(e);
   cur().updatedAt = Date.now();
   cur().dirty = true;
   persist();
@@ -1328,7 +1410,7 @@ function showRemoteUpdate(d) {
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 let wakeLock = null;
-let onFinal = (text, at) => addEntry(isMobile ? "スマホ" : "PC", text, at);
+let onFinal = (text, at, words) => addEntry(isMobile ? "スマホ" : "PC", text, at, words);
 let onInterim = () => {};
 let engine = "ai";
 try { engine = localStorage.getItem("mojiokoshi-engine") || "ai"; } catch (_) {}
@@ -1502,7 +1584,7 @@ function sendToAi(wav, at) {
       const res = await fetch("/api/transcribe", { method: "POST", body: wav, headers: { "Content-Type": "audio/wav" } });
       const data = await res.json().catch(() => ({}));
       if (res.ok) {
-        if (data.text) onFinal(data.text, at);
+        if (data.text) onFinal(data.text, at, data.words);
       } else if (data.error === "quota") {
         fallbackToBrowser("今日のAIの無料分を使い切りました（料金はかかりません。明日また使えます）。");
       } else if (res.status === 404 || res.status === 405) {
@@ -1707,7 +1789,7 @@ if (typeof qrcode === "undefined" && !isPhoneMode) {
     // スマホのホーム画面から「この文字起こしを開いて」「新しく作って」
     if (msg.type === "open" && lib.docs.some((d) => d.id === msg.id)) { openDoc(msg.id); showView("editor"); relaySync(); }
     if (msg.type === "new") { const doc = newDoc(String(msg.folderId || "")); openDoc(doc.id); showView("editor"); relaySync(); }
-    if (msg.type === "final") { addEntry("スマホ", String(msg.text), Number(msg.at) || Date.now()); setLive(""); }
+    if (msg.type === "final") { addEntry("スマホ", String(msg.text), Number(msg.at) || Date.now(), Array.isArray(msg.words) ? msg.words : undefined); setLive(""); }
     if (msg.type === "interim") setLive(String(msg.text || ""));
     if (msg.type === "getaudio") {
       // スマホから「この録音を聞きたい」
@@ -1796,9 +1878,9 @@ if (typeof qrcode === "undefined" && !isPhoneMode) {
   });
   relayOpen = (id) => { relayRoom.send({ type: "open", id }); toast("PCで開いています…"); };
   relayNew = (folderId) => { relayRoom.send({ type: "new", folderId }); toast("PCで新しい文字起こしを作っています…"); };
-  onFinal = (text, at = Date.now()) => {
-    addEntry("スマホ", text, at);
-    if (!relayRoom.send({ type: "final", text, at }) || !pcSeen) showError("PCとつながっていないため、この文章はPCに届いていない可能性があります。");
+  onFinal = (text, at = Date.now(), words) => {
+    addEntry("スマホ", text, at, words);
+    if (!relayRoom.send({ type: "final", text, at, words }) || !pcSeen) showError("PCとつながっていないため、この文章はPCに届いていない可能性があります。");
   };
   onInterim = (text) => { relayRoom.send({ type: "interim", text }); };
   relaySendAudio = async (blob, start, duration, mime) => {
