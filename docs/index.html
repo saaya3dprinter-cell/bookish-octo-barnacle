@@ -52,6 +52,7 @@
   .audioItem { display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:.85rem; color:var(--muted); margin:4px 0; }
   .audioItem audio { height:36px; flex:1; min-width:220px; }
   #transcript p.seek { cursor:pointer; }
+  .tag.speaker { cursor:pointer; font-weight:700; font-size:.8rem; }
   #transcript p.seek:hover { background:rgba(255,122,26,.08); border-radius:6px; }
   #transcript p.seek .meta::before { content:"▶ "; }
   .folder { margin-top:14px; }
@@ -218,19 +219,85 @@ function saveRecordingBlob(docId, start, blob, mime, duration) {
     lib.audios.push(a);
     persist();
     render();
+    // 録音の最後の文字起こしが届くのを少し待ってから、話した人を分析
+    setTimeout(() => diarizeRecording(a, blob), 4000);
   }).catch(() => showError("録音データを保存できませんでした（端末の空き容量を確認してください）"));
 }
 // 「11:42:45」のような時刻から、その時間を含む録音と何秒目かを探す
-function findAudioAt(time) {
+function offsetIn(a, time) {
   const m = /^(\d{1,2}):(\d{2}):(\d{2})$/.exec(time || "");
   if (!m) return null;
+  const d = new Date(a.start);
+  d.setHours(+m[1], +m[2], +m[3], 0);
+  const offset = (d.getTime() - a.start) / 1000;
+  return offset >= -2 && offset <= a.duration + 2 ? Math.max(0, offset) : null;
+}
+function findAudioAt(time) {
   for (const a of audiosOf(cur().id)) {
-    const d = new Date(a.start);
-    d.setHours(+m[1], +m[2], +m[3], 0);
-    const offset = (d.getTime() - a.start) / 1000;
-    if (offset >= -2 && offset <= a.duration + 2) return { audio: a, offset: Math.max(0, offset - 0.5) };
+    const offset = offsetIn(a, time);
+    if (offset !== null) return { audio: a, offset: Math.max(0, offset - 0.5) };
   }
   return null;
+}
+
+// ---------------------------------------------------------- 話者（A・B・C…）
+// 録音が終わったら、録音全体を AI に送って「何秒にだれが話したか」を調べ、
+// 文章の行ごとに一番長く話していた人を A・B・C… として付ける。名前は録音ごとに変えられる。
+const SPEAKER_COLORS = ["#ffe3cc", "#d8ecff", "#dff5e1", "#f3e0ff", "#fff3b8", "#ffd9de"];
+const speakerLabel = (e) => e.speakerName || e.speaker;
+const speakerColor = (key) => SPEAKER_COLORS[(key.charCodeAt(0) - 65) % SPEAKER_COLORS.length];
+
+async function diarizeRecording(a, blob) {
+  try {
+    const res = await fetch("/api/diarize", { method: "POST", body: blob, headers: { "Content-Type": a.mime.split(";")[0] } });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (data.error === "quota") toast("今日のAIの無料分を使い切ったため、話した人の分析はできませんでした");
+      return;
+    }
+    if (!data.words?.length) return;
+    assignSpeakers(a, data.words);
+  } catch (_) {}
+}
+function assignSpeakers(a, words) {
+  const doc = lib.docs.find((d) => d.id === a.docId);
+  if (!doc?.entries) return;
+  // 話した順に A, B, C…
+  const letters = {};
+  for (const w of words) if (!(w.sp in letters)) letters[w.sp] = String.fromCharCode(65 + Object.keys(letters).length);
+  const rows = doc.entries.map((e) => ({ e, o: offsetIn(a, e.time) })).filter((r) => r.o !== null).sort((x, y) => x.o - y.o);
+  const names = {};  // 前に付けた名前は残す
+  for (const { e } of rows) if (e.speaker && e.speakerName) names[e.speaker] = e.speakerName;
+  rows.forEach((r, i) => {
+    const end = rows[i + 1]?.o ?? a.duration + 1;
+    const talk = {};
+    for (const w of words) {
+      const overlap = Math.min(end, w.e) - Math.max(r.o, w.s);
+      if (overlap > 0) talk[w.sp] = (talk[w.sp] || 0) + overlap;
+    }
+    const best = Object.entries(talk).sort((x, y) => y[1] - x[1])[0];
+    if (!best) return;
+    r.e.speaker = letters[best[0]];
+    if (names[r.e.speaker]) r.e.speakerName = names[r.e.speaker]; else delete r.e.speakerName;
+  });
+  doc.updatedAt = Date.now();
+  persist();
+  render();
+  toast(`話した人を分けました（${Object.keys(letters).length}人）。A・Bなどを押すと名前を変えられます`);
+}
+// 録音ごとに、話者の名前を付け替える
+function renameSpeaker(a, key) {
+  const doc = cur();
+  const rows = a ? doc.entries.filter((e) => e.speaker === key && offsetIn(a, e.time) !== null) : doc.entries.filter((e) => e.speaker === key);
+  const now = rows.find((e) => e.speakerName)?.speakerName || "";
+  const name = prompt(`話者「${key}」の名前（${a ? "この録音の中だけ" : "この文字起こしの中で"}変わります。空にすると ${key} に戻ります）`, now);
+  if (name === null) return;
+  for (const e of rows) {
+    if (name.trim()) e.speakerName = name.trim(); else delete e.speakerName;
+  }
+  doc.updatedAt = Date.now();
+  persist();
+  render();
 }
 const audioUrls = {};
 async function audioUrl(a) {
@@ -246,7 +313,8 @@ async function audioUrl(a) {
 let audioListKey = "";
 function renderAudioList() {
   const list = audiosOf(cur().id);
-  const key = cur().id + ":" + list.map((a) => a.id).join(",");
+  const speakers = cur().entries.map((e) => (e.speaker || "") + (e.speakerName || "")).join(",");
+  const key = cur().id + ":" + list.map((a) => a.id).join(",") + ":" + speakers;
   if (key === audioListKey) return;  // 再生中に作り直さないように
   audioListKey = key;
   $("audioList").replaceChildren(...list.map((a, i) => {
@@ -261,6 +329,27 @@ function renderAudioList() {
     player.preload = "none";
     const load = button("▶ 聞く", async () => { await loadPlayer(a, player, load); player.play(); });
     row.append(label, load);
+    // この録音の話者（押すと名前変更）と「話者を分け直す」
+    const keys = [...new Set(cur().entries.filter((e) => e.speaker && offsetIn(a, e.time) !== null).map((e) => e.speaker))].sort();
+    const people = document.createElement("span");
+    for (const k of keys) {
+      const sample = cur().entries.find((e) => e.speaker === k && offsetIn(a, e.time) !== null);
+      const chip = document.createElement("button");
+      chip.className = "tag speaker";
+      chip.style.background = speakerColor(k);
+      chip.style.border = "0";
+      chip.textContent = `${k}${sample.speakerName ? "：" + sample.speakerName : ""}`;
+      chip.onclick = () => renameSpeaker(a, k);
+      people.append(chip);
+    }
+    if (!isPhoneMode) {
+      people.append(button(keys.length ? "話者を分け直す" : "👥 話者を分ける", async () => {
+        toast("話した人を分析しています…");
+        const blob = await blobGet(a.id).catch(() => null) || (a.driveId && cloud.on ? await gfetch(`/drive/v3/files/${a.driveId}?alt=media`, { raw: true }).catch(() => null) : null);
+        if (blob) diarizeRecording(a, blob); else toast("この端末に録音データがありません");
+      }));
+    }
+    row.append(people);
     blobGet(a.id).then((b) => { if (b) loadPlayer(a, player, load); }).catch(() => {});
     return row;
   }));
@@ -412,12 +501,21 @@ function render() {
     const meta = document.createElement("span");
     meta.className = "meta";
     meta.textContent = e.time;
+    const hit = findAudioAt(e.time);
     const tag = document.createElement("span");
-    tag.className = "tag" + (e.source === "スマホ" ? " phone" : "");
-    tag.textContent = e.source;
+    if (e.speaker) {
+      // 話者（押すと名前を変えられる）
+      tag.className = "tag speaker";
+      tag.style.background = speakerColor(e.speaker);
+      tag.textContent = speakerLabel(e);
+      tag.title = "押すと名前を変えられます";
+      tag.onclick = (ev) => { ev.stopPropagation(); if (!isPhoneMode) renameSpeaker(hit?.audio, e.speaker); };
+    } else {
+      tag.className = "tag" + (e.source === "スマホ" ? " phone" : "");
+      tag.textContent = e.source;
+    }
     meta.append(tag);
     para.append(meta, document.createTextNode(e.text));
-    const hit = findAudioAt(e.time);
     if (hit) {
       para.className = "seek";
       para.title = "押すとこの部分の録音を再生";
@@ -611,7 +709,7 @@ function addEntry(source, text, at = Date.now()) {
 renderAll();
 
 $("copy").onclick = async () => {
-  const text = entries.map((e) => e.text).join("\n");
+  const text = entries.map((e) => (e.speaker ? speakerLabel(e) + "：" : "") + e.text).join("\n");
   try { await navigator.clipboard.writeText(text); alert("コピーしました"); }
   catch (_) { prompt("コピーしてください", text); }
 };
@@ -637,7 +735,7 @@ function hasEntries() {
 
 $("save").onclick = () => {
   if (!hasEntries()) return;
-  const text = entries.map((e) => `[${e.time}] (${e.source}) ${e.text}`).join("\n");
+  const text = entries.map((e) => `[${e.time}] ${e.speaker ? speakerLabel(e) : e.source}：${e.text}`).join("\n");
   downloadBlob(new Blob([text], { type: "text/plain" }), `${fileBase()}.txt`);
 };
 
@@ -671,6 +769,7 @@ $("word").onclick = async () => {
             spacing: { after: 120 },
             children: [
               new TextRun({ text: `${e.time} ${e.source}  `, color: "888888", size: 16 }),
+              ...(e.speaker ? [new TextRun({ text: speakerLabel(e) + "：", bold: true })] : []),
               new TextRun({ text: e.text }),
             ],
           })),
@@ -699,8 +798,10 @@ $("pdf").onclick = () => {
     const para = document.createElement("p");
     const meta = document.createElement("span");
     meta.className = "meta";
-    meta.textContent = `${e.time} ${e.source}`;
-    para.append(meta, document.createTextNode(e.text));
+    meta.textContent = `${e.time} ${e.speaker ? "" : e.source}`;
+    const who = document.createElement("b");
+    who.textContent = e.speaker ? speakerLabel(e) + "：" : "";
+    para.append(meta, who, document.createTextNode(e.text));
     return para;
   }));
   const oldTitle = document.title;
@@ -727,10 +828,20 @@ Object.assign(cloud, {
 });
 
 async function cloudInit() {
-  let clientId = "";
-  try { clientId = (await (await fetch("/api/config")).json()).googleClientId || ""; } catch (_) {}
+  let config = {};
+  try { config = await (await fetch("/api/config")).json(); } catch (_) {}
+  const clientId = config.googleClientId || "";
   if (!clientId || isPhoneModeOnlyRelay()) return;
   $("account").hidden = false;
+  $("logout").onclick = cloudLogout;
+  if (config.serverLogin) {
+    // 一度ログインすれば、ページを閉じてもログインしたまま（鍵はこの端末の Cookie に暗号化して保存）
+    cloud.server = true;
+    $("login").onclick = () => { location.href = "/api/auth/login?return=" + encodeURIComponent(location.pathname + location.search); };
+    const t = await serverToken();
+    if (t) onGoogleToken(t);
+    return;
+  }
   await loadScript("https://accounts.google.com/gsi/client").catch(() => null);
   if (!window.google?.accounts?.oauth2) { $("account").hidden = true; return; }
   cloud.tokenClient = google.accounts.oauth2.initTokenClient({
@@ -740,7 +851,6 @@ async function cloudInit() {
     error_callback: (e) => cloudNotice("Googleログインできませんでした: " + (e?.message || e?.type || "")),
   });
   $("login").onclick = () => cloud.tokenClient.requestAccessToken({ prompt: cloud.email ? "" : "select_account" });
-  $("logout").onclick = cloudLogout;
   try { if (localStorage.getItem("mojiokoshi-google")) $("login").textContent = "Googleドライブにつなぐ"; } catch (_) {}
 }
 // QRコードで開いた「マイク役」のスマホは、PCに文字を送るだけなのでログイン不要
@@ -764,21 +874,48 @@ async function onGoogleToken(resp) {
   cloudNotice("");
   if (cloud.on) { cloudSync(); return; }  // 再接続
   try {
-    const me = await gfetch("/oauth2/v3/userinfo");
-    cloud.email = me.email || "";
+    cloud.email = resp.email || (await gfetch("/oauth2/v3/userinfo")).email || "";
     await cloudStart();
   } catch (e) {
     cloudNotice("Googleドライブにつなげませんでした: " + e.message);
   }
 }
 
-async function gfetch(path, opts = {}) {
-  if (!cloud.token || Date.now() > cloud.exp) { cloudNeedLogin(); throw new Error("ログインが切れました"); }
+async function serverToken() {
+  try {
+    const res = await fetch("/api/auth/token", { method: "POST" });
+    return res.ok ? await res.json() : null;
+  } catch (_) {
+    return null;
+  }
+}
+// 短時間用の鍵が切れていたら、ログインしたままの鍵から作り直す
+async function ensureToken(force) {
+  if (!force && cloud.token && Date.now() < cloud.exp) return true;
+  if (cloud.server) {
+    const t = await serverToken();
+    if (t) {
+      cloud.token = t.access_token;
+      cloud.exp = Date.now() + (Number(t.expires_in) || 3600) * 1000 - 60_000;
+      return true;
+    }
+  }
+  cloud.token = null;
+  cloudNeedLogin();
+  return false;
+}
+async function gfetch(path, opts = {}, retried = false) {
+  if (!(await ensureToken())) throw new Error("ログインが切れました");
   const res = await fetch(path.startsWith("http") ? path : GAPI + path, {
     ...opts,
     headers: { Authorization: "Bearer " + cloud.token, ...(opts.headers || {}) },
   });
-  if (res.status === 401) { cloud.token = null; cloudNeedLogin(); throw new Error("ログインが切れました"); }
+  if (res.status === 401) {
+    if (!retried && cloud.server && (await ensureToken(true))) return gfetch(path, opts, true);
+    cloud.token = null;
+    cloudNeedLogin();
+    throw new Error("ログインが切れました");
+  }
   if (!res.ok) throw new Error(`Google ${res.status}: ${(await res.text()).slice(0, 200)}`);
   if (opts.raw) return opts.raw === "response" ? res : res.blob();
   const type = res.headers.get("content-type") || "";
@@ -786,7 +923,7 @@ async function gfetch(path, opts = {}) {
 }
 function cloudNeedLogin() {
   cloudNotice("Googleドライブとの接続が切れました。押すとつなぎ直して保存を続けます（それまではこの端末に保存されます）。",
-    "つなぎ直す", () => cloud.tokenClient.requestAccessToken({ prompt: "" }));
+    "つなぎ直す", () => cloud.server ? $("login").onclick() : cloud.tokenClient.requestAccessToken({ prompt: "" }));
 }
 const q = (s) => encodeURIComponent(s);
 
@@ -845,7 +982,8 @@ async function cloudStart() {
 }
 
 function cloudLogout() {
-  try { google.accounts.oauth2.revoke(cloud.token, () => {}); } catch (_) {}
+  if (cloud.server) fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+  else try { google.accounts.oauth2.revoke(cloud.token, () => {}); } catch (_) {}
   try { localStorage.removeItem("mojiokoshi-google"); } catch (_) {}
   clearInterval(cloud.pollTimer);
   Object.assign(cloud, { on: false, token: null, email: "" });
@@ -864,7 +1002,7 @@ function cloudChanged() {
   cloud.pushTimer = setTimeout(cloudSync, 1200);
 }
 async function cloudSync() {
-  if (!cloud.on || !cloud.token) return;
+  if (!cloud.on || (!cloud.token && !cloud.server)) return;
   if (cloud.busy) { cloud.again = true; return; }
   cloud.busy = true;
   try {
@@ -884,19 +1022,34 @@ async function cloudSync() {
 
 // ---- ドキュメントの中身（1行 = [時刻] (PC/スマホ) 文章）
 const sig = (list) => list.length + ":" + JSON.stringify(list).length;
+// 1行 = [時刻] (PC/スマホ) 【A 名前】 文章   （【】は話者を分けたときだけ）
 function toText(list) {
-  return list.map((e) => `[${e.time}] (${e.source}) ${e.text}`).join("\n");
+  return list.map((e) => `[${e.time}] (${e.source}) ${e.speaker ? `【${e.speaker}${e.speakerName ? " " + e.speakerName : ""}】 ` : ""}${e.text}`).join("\n");
 }
 function fromText(text) {
-  return text.replace(/^﻿/, "").split(/\r?\n/).map((line) => {
+  return text.replace(/^\uFEFF/, "").split(/\r?\n/).map((line) => {
     const m = line.match(/^\[(.+?)\] \((.+?)\) (.*)$/);
-    return m ? { time: m[1], source: m[2], text: m[3] } : line.trim() ? { time: "", source: "", text: line.trim() } : null;
+    if (!m) return line.trim() ? { time: "", source: "", text: line.trim() } : null;
+    const e = { time: m[1], source: m[2], text: m[3] };
+    const sp = e.text.match(/^【([A-Z])(?: ([^】]*))?】 ?(.*)$/);
+    if (sp) {
+      e.speaker = sp[1];
+      if (sp[2]) e.speakerName = sp[2];
+      e.text = sp[3];
+    }
+    return e;
   }).filter(Boolean);
 }
 function mergeEntries(remote, local) {
   const key = (e) => `${e.time}|${e.source}|${e.text}`;
+  const localByKey = new Map(local.map((e) => [key(e), e]));
   const seen = new Set(remote.map(key));
-  return [...remote, ...local.filter((e) => !seen.has(key(e)))];
+  // 同じ行で、ドライブ側に話者がまだ付いていなければ、こちらの話者を残す
+  const merged = remote.map((r) => {
+    const l = localByKey.get(key(r));
+    return l?.speaker && !r.speaker ? { ...r, speaker: l.speaker, ...(l.speakerName ? { speakerName: l.speakerName } : {}) } : r;
+  });
+  return [...merged, ...local.filter((e) => !seen.has(key(e)))];
 }
 async function cloudLoadDoc(doc) {
   try {
