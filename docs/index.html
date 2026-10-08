@@ -43,6 +43,8 @@
   .tabs { display:flex; gap:6px; flex-wrap:wrap; }
   .tab { padding:7px 12px; border-radius:999px; border:1px solid #ccc; background:var(--card); color:var(--fg); cursor:pointer; font:inherit; font-size:.9rem; }
   .tab.on { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:700; }
+  body.relay .docItem select, body.relay .docItem .small, body.relay #homeFolderBar .small,
+  body.relay #folderTabs > button.small { display:none; }
   #recBadge { color:#d62f2f; border-color:#d62f2f; font-weight:700; }
   #toast { position:fixed; left:50%; bottom:24px; transform:translateX(-50%); background:#222; color:#fff;
            padding:10px 16px; border-radius:10px; font-size:.95rem; z-index:10; }
@@ -166,6 +168,7 @@
 const params = new URLSearchParams(location.search);
 const room = params.get("room");           // ?room=xxx があれば「スマホ（マイク役）」モード
 const isPhoneMode = !!room;
+let recording = false;  // 録音中かどうか
 const $ = (id) => document.getElementById(id);
 
 $("where").textContent = isPhoneMode
@@ -326,20 +329,27 @@ if (!isPhoneMode) try {
 let storeKey = isPhoneMode ? null : DB_KEY;
 // QRでつないだスマホとのやりとり（PC側: つながっているスマホ / スマホ側: 録音を送る関数）
 const relayConns = new Set();
-let lastRelayName = "";
-let relaySendAudio = () => {};
-// PCで開いている文字起こしの名前を、つながっているスマホに知らせる
-function relayDocName() {
+let relayTimer = null;
+let relayOpen = null, relayNew = null;  // スマホ側: PCに「開いて」「新しく作って」と頼む
+// PCの一覧と、開いている文字起こしの中身を、つながっているスマホに送る
+function relaySync() {
   if (isPhoneMode || !relayConns.size || !lib.docs.length) return;
-  const name = cur().name;
-  if (name === lastRelayName) return;
-  lastRelayName = name;
-  for (const c of relayConns) if (c.open) c.send({ type: "doc", name });
-}  // Googleにログイン中は、その人用のキャッシュに切り替わる
+  clearTimeout(relayTimer);
+  relayTimer = setTimeout(() => {
+    const doc = cur();
+    const msg = {
+      type: "lib",
+      folders: lib.folders.map((f) => ({ id: f.id, name: f.name })),
+      docs: lib.docs.map((d) => ({ id: d.id, name: d.name, folderId: d.folderId, createdAt: d.createdAt, updatedAt: d.updatedAt, count: countOf(d) })),
+      current: { id: doc.id, entries: doc.entries || [] },
+    };
+    for (const c of relayConns) if (c.open) c.send(msg);
+  }, 300);
+}
 function persist() {
   if (storeKey) try { localStorage.setItem(storeKey, JSON.stringify(lib)); } catch (_) {}
   if (cloud.on) cloudChanged();
-  relayDocName();
+  relaySync();
 }
 
 function defaultName() {
@@ -361,6 +371,7 @@ if (!cur().entries) cur().entries = [];
 let entries = cur().entries;
 
 function openDoc(id) {
+  if (isPhoneMode && relayOpen && id !== lib.currentId) { relayOpen(id); return; }
   lib.currentId = id;
   const doc = cur();
   if (!doc.entries) {
@@ -405,12 +416,13 @@ function render() {
     return para;
   }));
   renderAudioList();
+  if (!recording) $("rec").textContent = entries.length ? "● 続きを録音" : "● 録音開始";
   $("docInfo").textContent = `📁 ${folderName(cur().folderId)} ・ ${entries.length}件`;
   scrollToEnd();
 }
 function renderDocBar() {
   const doc = cur();
-  if (document.activeElement !== $("docName")) $("docName").value = doc.name;
+  if (document.activeElement !== $("docName")) $("docName").value = isPhoneMode ? "💻 PCの「" + doc.name + "」に送っています" : doc.name;
   const sel = $("docFolder");
   sel.replaceChildren(
     new Option("📁 未分類", ""),
@@ -418,7 +430,7 @@ function renderDocBar() {
     new Option("＋ 新しいフォルダ…", "__new"),
   );
   sel.value = doc.folderId || "";
-  relayDocName();
+  relaySync();
 }
 // ---------------------------------------------------------- ホーム（フォルダごとの一覧）
 let homeFolder = "all";
@@ -518,6 +530,7 @@ window.addEventListener("popstate", () => showView(location.hash === "#home" ? "
 $("homeBtn").onclick = () => showView("home");
 $("recBadge").onclick = () => showView("editor");
 $("homeNew").onclick = () => {
+  if (isPhoneMode) { relayNew?.(homeFolder === "all" ? "" : homeFolder); showView("editor"); return; }
   const doc = newDoc(homeFolder === "all" ? "" : homeFolder);
   openDoc(doc.id);
   showView("editor");
@@ -1106,7 +1119,7 @@ function showRemoteUpdate(d) {
 //   browser : ブラウザ標準の音声認識（Chrome など）。AI の無料分を使い切った日の予備
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-let recording = false, wakeLock = null;
+let wakeLock = null;
 let onFinal = (text, at) => addEntry(isMobile ? "スマホ" : "PC", text, at);
 let onInterim = () => {};
 let engine = "ai";
@@ -1141,7 +1154,7 @@ function stopRec() {
   recording = false;
   stopAi();
   stopBrowser();
-  $("rec").textContent = "● 録音開始";
+  $("rec").textContent = entries.length ? "● 続きを録音" : "● 録音開始";
   $("rec").classList.remove("on");
   $("recBadge").hidden = true;
   if (!aiPending) setLive("");
@@ -1431,10 +1444,12 @@ if (typeof Peer === "undefined" || typeof qrcode === "undefined") {
     conn.on("open", () => {
       $("pairStatus").textContent = "✅ スマホがつながりました";
       relayConns.add(conn);
-      lastRelayName = "";
-      relayDocName();
+      relaySync();
     });
     conn.on("data", (msg) => {
+      // スマホのホーム画面から「この文字起こしを開いて」「新しく作って」
+      if (msg?.type === "open" && lib.docs.some((d) => d.id === msg.id)) { openDoc(msg.id); showView("editor"); }
+      if (msg?.type === "new") { const doc = newDoc(String(msg.folderId || "")); openDoc(doc.id); showView("editor"); }
       if (msg?.type === "final") { addEntry("スマホ", String(msg.text), Number(msg.at) || Date.now()); setLive(""); }
       if (msg?.type === "interim") setLive(String(msg.text));
       if (msg?.type === "audio" && msg.data) {
@@ -1451,9 +1466,11 @@ if (typeof Peer === "undefined" || typeof qrcode === "undefined") {
   peer.on("error", (e) => { $("pairStatus").textContent = "接続の準備でエラー: " + e.type + "（ページを再読み込みしてください）"; });
 } else {
   // スマホ側: PCにつないで、認識した文字と録音を送る（スマホには保存しない）
-  for (const el of [$("homeBtn"), $("saveDoc"), $("newDoc"), $("docFolder"), $("clear")]) el.hidden = true;
+  document.body.classList.add("relay");
+  for (const el of [$("saveDoc"), $("newDoc"), $("docFolder"), $("clear")]) el.hidden = true;
   $("docName").readOnly = true;
   $("docName").value = "（PCにつないでいます…）";
+  lib.docs[0].name = "（PCにつないでいます…）";
   let conn = null;
   const peer = new Peer();
   const setStatus = (t) => { if (!recording) $("status").textContent = t; };
@@ -1462,11 +1479,19 @@ if (typeof Peer === "undefined" || typeof qrcode === "undefined") {
     conn = peer.connect(PREFIX + room, { reliable: true });
     conn.on("open", () => setStatus("✅ PCにつながりました。録音開始を押して話してください"));
     conn.on("data", (msg) => {
-      if (msg?.type === "doc") {
-        $("docName").value = "💻 PCの「" + String(msg.name) + "」に送っています";
-        cur().name = String(msg.name);
+      // PCの一覧と、PCで開いている文字起こしをそのまま映す
+      if (msg?.type === "lib") {
+        lib.folders = msg.folders || [];
+        lib.docs = (msg.docs || []).map((d) => ({ ...d, entries: d.id === msg.current.id ? msg.current.entries : null }));
+        lib.currentId = msg.current.id;
+        lib.audios = [];
+        entries = cur().entries || [];
+        renderAll();
+        $("docName").value = "💻 PCの「" + cur().name + "」に送っています";
       }
     });
+    relayOpen = (id) => { conn.send({ type: "open", id }); toast("PCで開いています…"); };
+    relayNew = (folderId) => { conn.send({ type: "new", folderId }); toast("PCで新しい文字起こしを作っています…"); };
     conn.on("close", () => { $("status").textContent = "PCとの接続が切れました。PCのQRコードをもう一度読み取ってください。"; });
   });
   peer.on("error", (e) => {
