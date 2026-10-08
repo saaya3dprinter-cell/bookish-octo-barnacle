@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>音声文字起こし</title>
+<style>
+  :root { --bg:#fff7f0; --fg:#222; --accent:#ff7a1a; --card:#fff; --muted:#888; --line:#f0e6dd; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#1b1714; --fg:#eee; --card:#26211d; --muted:#aaa; --line:#3a322c; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, "Hiragino Sans", "Yu Gothic UI", sans-serif;
+         background:var(--bg); color:var(--fg); }
+  main { max-width: 760px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 1.3rem; margin: 8px 0 4px; }
+  .sub { color: var(--muted); font-size: .9rem; margin-bottom: 12px; }
+  .card { background:var(--card); border-radius:14px; padding:16px; margin-bottom:14px;
+          box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+  #rec { width:100%; padding:22px; font-size:1.3rem; font-weight:700; border:0; border-radius:14px;
+         background:var(--accent); color:#fff; cursor:pointer; }
+  #rec.on { background:#d62f2f; }
+  #rec:disabled { opacity:.5; }
+  #interim { min-height:1.6em; margin-top:10px; color:var(--muted); }
+  #status { font-size:.9rem; color:var(--muted); margin-top:6px; }
+  #qr { display:flex; justify-content:center; margin:10px 0; }
+  #qr img { background:#fff; padding:8px; border-radius:8px; width:200px; height:200px; image-rendering: pixelated; }
+  #phoneLink { font-size:.8rem; word-break: break-all; color: var(--muted); }
+  #list { list-style:none; margin:0; padding:0; }
+  #list li { padding:8px 0; border-bottom:1px solid var(--line); line-height:1.6; }
+  #list .meta { font-size:.75rem; color:var(--muted); }
+  .tag { display:inline-block; padding:0 6px; border-radius:6px; background:#ffe3cc; color:#222; margin-left:4px; }
+  .tag.phone { background:#d8ecff; }
+  .row { display:flex; gap:8px; justify-content:space-between; align-items:center; flex-wrap:wrap; }
+  button.small { padding:6px 12px; border-radius:8px; border:1px solid #ccc; background:var(--card); color:var(--fg); cursor:pointer; }
+  .warn { background:#fff1c2; color:#5a4500; padding:10px 12px; border-radius:10px; margin-bottom:14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>🎙 音声文字起こし</h1>
+  <div class="sub" id="where"></div>
+  <div class="warn" id="unsupported" hidden>
+    このブラウザは音声認識に対応していません。PCは <b>Chrome / Edge</b>、iPhoneは <b>Safari</b>、Androidは <b>Chrome</b> で開いてください。
+  </div>
+
+  <div class="card">
+    <button id="rec">● 録音開始</button>
+    <div id="interim"></div>
+    <div id="status"></div>
+  </div>
+
+  <div class="card" id="pairCard" hidden>
+    <strong>📱 スマホをマイクにする</strong>
+    <div class="sub" style="margin:6px 0 0">PCにマイクがないときは、スマホのカメラでこのQRコードを読み取ってください。スマホで話した内容がこの画面に出ます。</div>
+    <div id="qr"></div>
+    <div id="phoneLink"></div>
+    <div id="pairStatus" class="sub" style="margin:6px 0 0"></div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <strong>文字起こし結果</strong>
+      <div>
+        <button class="small" id="copy">コピー</button>
+        <button class="small" id="save">.txt保存</button>
+        <button class="small" id="clear">クリア</button>
+      </div>
+    </div>
+    <ul id="list"></ul>
+  </div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
+<script>
+const params = new URLSearchParams(location.search);
+const room = params.get("room");           // ?room=xxx があれば「スマホ（マイク役）」モード
+const isPhoneMode = !!room;
+const $ = (id) => document.getElementById(id);
+
+$("where").textContent = isPhoneMode
+  ? "このスマホのマイクで話すと、PCの画面に文字が届きます"
+  : "このPCのマイクで録音できます。マイクがないときは下のQRコードでスマホをつなげます";
+
+// ---------------------------------------------------------- 結果リスト
+const STORE_KEY = "transcripts-v1";
+let entries = [];
+try { entries = JSON.parse(localStorage.getItem(STORE_KEY) || "[]"); } catch (_) {}
+function persist() { try { localStorage.setItem(STORE_KEY, JSON.stringify(entries)); } catch (_) {} }
+
+function render() {
+  $("list").replaceChildren(...entries.slice().reverse().map((e) => {
+    const li = document.createElement("li");
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = e.time;
+    const tag = document.createElement("span");
+    tag.className = "tag" + (e.source === "スマホ" ? " phone" : "");
+    tag.textContent = e.source;
+    meta.append(tag);
+    const body = document.createElement("div");
+    body.textContent = e.text;
+    li.append(meta, body);
+    return li;
+  }));
+}
+function addEntry(source, text) {
+  text = text.trim();
+  if (!text) return;
+  entries.push({ time: new Date().toLocaleTimeString("ja-JP"), source, text });
+  persist();
+  render();
+}
+render();
+
+$("copy").onclick = async () => {
+  const text = entries.map((e) => e.text).join("\n");
+  try { await navigator.clipboard.writeText(text); alert("コピーしました"); }
+  catch (_) { prompt("コピーしてください", text); }
+};
+$("save").onclick = () => {
+  const text = entries.map((e) => `[${e.time}] (${e.source}) ${e.text}`).join("\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+  a.download = `文字起こし_${new Date().toISOString().slice(0, 10)}.txt`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+$("clear").onclick = () => {
+  if (confirm("文字起こし結果を全部消しますか？")) { entries = []; persist(); render(); }
+};
+
+// ---------------------------------------------------------- 音声認識（ブラウザ標準の機能・無料）
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recog = null, recording = false, wakeLock = null;
+let onFinal = (text) => addEntry("PC", text);
+let onInterim = () => {};
+
+if (!SR) {
+  $("unsupported").hidden = false;
+  $("rec").disabled = true;
+}
+
+function startRec() {
+  recog = new SR();
+  recog.lang = "ja-JP";
+  recog.continuous = true;
+  recog.interimResults = true;
+  recog.onresult = (ev) => {
+    let interim = "";
+    for (let i = ev.resultIndex; i < ev.results.length; i++) {
+      const r = ev.results[i];
+      if (r.isFinal) onFinal(r[0].transcript);
+      else interim += r[0].transcript;
+    }
+    $("interim").textContent = interim;
+    onInterim(interim);
+  };
+  recog.onerror = (ev) => {
+    if (ev.error === "not-allowed" || ev.error === "service-not-allowed") {
+      alert("マイクが許可されていません。ブラウザのアドレスバーのマイクのアイコンから許可してください。");
+      stopRec();
+    } else if (ev.error === "audio-capture") {
+      $("status").textContent = "マイクが見つかりません。スマホをマイクにする場合は下のQRコードを使ってください。";
+      stopRec();
+    } else if (ev.error !== "no-speech" && ev.error !== "aborted") {
+      $("status").textContent = "エラー: " + ev.error;
+    }
+  };
+  // 無音が続くとブラウザが勝手に止めるので、録音中なら自動で再開する
+  recog.onend = () => { if (recording) setTimeout(() => { try { recog.start(); } catch (_) {} }, 250); };
+  recog.start();
+  recording = true;
+  $("rec").textContent = "■ 停止";
+  $("rec").classList.add("on");
+  $("status").textContent = "聞き取り中…（話すと文字になります）";
+  navigator.wakeLock?.request("screen").then((l) => (wakeLock = l)).catch(() => {});
+}
+function stopRec() {
+  recording = false;
+  try { recog?.stop(); } catch (_) {}
+  $("rec").textContent = "● 録音開始";
+  $("rec").classList.remove("on");
+  $("interim").textContent = "";
+  $("status").textContent = "";
+  onInterim("");
+  wakeLock?.release?.(); wakeLock = null;
+}
+$("rec").onclick = () => (recording ? stopRec() : startRec());
+
+// ---------------------------------------------------------- スマホ ⇔ PC 接続（WebRTC / PeerJS）
+const PREFIX = "saaya-transcribe-";
+
+if (typeof Peer === "undefined" || typeof qrcode === "undefined") {
+  // 通信用のライブラリが読み込めなくても、このPCだけでの録音はできる
+  $("status").textContent = "スマホ接続の準備ができませんでした（ネット接続を確認して再読み込みしてください）";
+} else if (!isPhoneMode) {
+  // PC側: 受信の窓口をつくってQRコードを表示
+  $("pairCard").hidden = false;
+  const id = PREFIX + Math.random().toString(36).slice(2, 10);
+  const peer = new Peer(id);
+  const phoneUrl = location.origin + location.pathname + "?room=" + id.slice(PREFIX.length);
+  const qr = qrcode(0, "M");
+  qr.addData(phoneUrl);
+  qr.make();
+  $("qr").innerHTML = qr.createImgTag(6, 8);
+  $("phoneLink").textContent = phoneUrl;
+  $("pairStatus").textContent = "スマホの接続を待っています…";
+  peer.on("connection", (conn) => {
+    conn.on("open", () => { $("pairStatus").textContent = "✅ スマホがつながりました"; });
+    conn.on("data", (msg) => {
+      if (msg?.type === "final") { addEntry("スマホ", String(msg.text)); $("interim").textContent = ""; }
+      if (msg?.type === "interim") $("interim").textContent = "📱 " + String(msg.text);
+    });
+    conn.on("close", () => { $("pairStatus").textContent = "スマホの接続が切れました。もう一度QRコードを読み取ってください。"; });
+  });
+  peer.on("error", (e) => { $("pairStatus").textContent = "接続の準備でエラー: " + e.type + "（ページを再読み込みしてください）"; });
+} else {
+  // スマホ側: PCにつないで、認識した文字を送る
+  let conn = null;
+  const peer = new Peer();
+  const setStatus = (t) => { if (!recording) $("status").textContent = t; };
+  setStatus("PCに接続中…");
+  peer.on("open", () => {
+    conn = peer.connect(PREFIX + room, { reliable: true });
+    conn.on("open", () => setStatus("✅ PCにつながりました。録音開始を押して話してください"));
+    conn.on("close", () => { $("status").textContent = "PCとの接続が切れました。PCのQRコードをもう一度読み取ってください。"; });
+  });
+  peer.on("error", (e) => {
+    $("status").textContent = e.type === "peer-unavailable"
+      ? "PCが見つかりません。PCでページを開いたまま、QRコードを読み取り直してください。"
+      : "接続エラー: " + e.type;
+  });
+  onFinal = (text) => {
+    addEntry("スマホ", text);
+    if (conn?.open) conn.send({ type: "final", text });
+  };
+  onInterim = (text) => { if (conn?.open) conn.send({ type: "interim", text }); };
+}
+</script>
+</body>
+</html>
