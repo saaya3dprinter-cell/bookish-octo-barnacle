@@ -18,6 +18,6 @@
   },
   "vars": {
     // Google Cloud で作った「OAuth クライアントID」（公開して問題ない値）。空のあいだはログインボタンが出ない
-    "GOOGLE_CLIENT_ID": ""
+    "GOOGLE_CLIENT_ID": "174450966806-r2l88c44o1vkg531t4m9q8dfmr5ulub0.apps.googleusercontent.com"
   }
 }
