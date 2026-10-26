@@ -1,0 +1,144 @@
+  :root {
+    --bg:#fff7f0; --fg:#222; --muted:#7a7068; --card:#fff; --line:#efe3d8; --accent:#ff7a1a; --accent-soft:#fff0e3;
+    --rec:#e5484d; --ok:#2bb673; --shadow:0 1px 3px rgba(0,0,0,.08); --tap: rgba(0,0,0,.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#1b1714; --fg:#eee; --muted:#a99f97; --card:#26211d; --line:#3a322c; --accent-soft:#3a2617; --tap: rgba(255,255,255,.06); }
+  }
+  * { box-sizing:border-box; }
+  html { -webkit-text-size-adjust:100%; }
+  body { margin:0; font-family:system-ui, -apple-system, "Hiragino Sans", "Yu Gothic UI", sans-serif; background:var(--bg); color:var(--fg); }
+  button { font:inherit; color:inherit; }
+  .app { max-width:760px; margin:0 auto; min-height:100vh; }
+
+  /* ---- 上のバー */
+  .appbar { position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:6px; padding:8px 10px;
+            background:var(--bg); border-bottom:1px solid var(--line); }
+  .appbar h1 { font-size:1.15rem; margin:0 0 0 6px; flex:1; }
+  .iconbtn { border:0; background:none; padding:8px 10px; border-radius:10px; cursor:pointer; font-size:1rem; white-space:nowrap; }
+  .iconbtn:hover { background:var(--tap); }
+  .iconbtn.big { font-size:1.3rem; line-height:1; padding:6px 10px; }
+  #docName { flex:1; min-width:0; font:inherit; font-size:1.05rem; font-weight:700; color:var(--fg); background:transparent;
+             border:1px solid transparent; border-radius:8px; padding:7px 8px; }
+  #docName:hover { border-color:var(--line); }
+  #docName:focus { outline:none; border-color:var(--accent); background:var(--card); }
+  .savebtn { border:0; border-radius:999px; padding:8px 16px; font-weight:700; cursor:pointer; background:var(--accent); color:#fff; white-space:nowrap; }
+  .savebtn.saved { background:var(--line); color:var(--muted); }
+  .savebtn:disabled { opacity:.6; }
+  .subbar { display:flex; align-items:center; gap:4px 10px; flex-wrap:wrap; padding:6px 16px; font-size:.85rem; color:var(--muted); }
+  .subbar select { font:inherit; color:var(--fg); background:var(--card); border:1px solid var(--line); border-radius:999px; padding:4px 10px; }
+  #saveState.unsaved { color:var(--accent); font-weight:700; }
+  .content { padding:8px 16px 170px; }
+  .account { display:flex; align-items:center; gap:6px; font-size:.85rem; color:var(--muted); }
+  .pill { border:1px solid var(--line); background:var(--card); border-radius:999px; padding:7px 14px; cursor:pointer; white-space:nowrap; }
+  .pill.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:700; }
+  .notice { margin:8px 16px 0; background:#fff1c2; color:#5a4500; padding:10px 12px; border-radius:10px; font-size:.9rem; }
+  .notice button { margin-left:8px; }
+
+  /* ---- 文字起こし */
+  #transcript { font-size:1.2rem; line-height:1.85; }
+  #transcript p { margin:0; padding:8px 8px; border-radius:10px; }
+  #transcript p + p { border-top:1px solid var(--line); }
+  #transcript p.seek { cursor:pointer; }
+  #transcript p.seek:hover { background:var(--accent-soft); }
+  #transcript .meta { display:inline-flex; align-items:center; gap:6px; margin-right:8px; vertical-align:2px; font-size:.7rem; color:var(--muted); }
+  #transcript p.seek .meta::before { content:"▶"; font-size:.6rem; opacity:.6; }
+  #live { color:var(--muted); padding:8px; margin:0; }
+  #done:empty + #live:empty::before { content:attr(data-hint); display:block; text-align:center; padding:48px 12px; font-size:1rem; line-height:1.7; }
+  .tag { display:inline-block; padding:1px 8px; border-radius:999px; background:#ffe3cc; color:#222; font-size:.75rem; }
+  .tag.phone { background:#d8ecff; }
+  .tag.speaker { font-weight:700; font-size:.8rem; }
+  .tag.pick { cursor:pointer; }
+  .tag.pick:hover { outline:2px solid var(--accent); }
+
+  /* ---- 録音データ */
+  #audioList:not(:empty) { margin:4px 0 10px; display:grid; gap:6px; }
+  .audioItem { display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:.85rem; color:var(--muted);
+               background:var(--card); border-radius:12px; padding:8px 10px; box-shadow:var(--shadow); }
+  .audioItem audio { height:36px; flex:1; min-width:200px; }
+  .audioItem .small, .small { padding:5px 12px; border-radius:999px; border:1px solid var(--line); background:var(--card); cursor:pointer; font-size:.85rem; }
+
+  /* ---- 下の録音バー */
+  .recbar { position:fixed; left:0; right:0; bottom:0; z-index:6; background:var(--card); box-shadow:0 -2px 12px rgba(0,0,0,.08);
+            padding:10px 16px calc(12px + env(safe-area-inset-bottom)); }
+  .recbar .inner { max-width:728px; margin:0 auto; }
+  .recrow { display:flex; align-items:center; gap:10px; }
+  #rec { flex:1; height:58px; border:0; border-radius:999px; font-size:1.15rem; font-weight:700; cursor:pointer;
+         background:var(--rec); color:#fff; box-shadow:0 4px 14px rgba(229,72,77,.35); }
+  #rec.on { background:#222; box-shadow:none; }
+  @media (prefers-color-scheme: dark) { #rec.on { background:#555; } }
+  #rec:disabled { opacity:.5; }
+  #pairBtn { height:58px; }
+  .meterRow { display:flex; align-items:center; gap:8px; margin-bottom:8px; font-size:.8rem; color:var(--muted); }
+  .meter { flex:1; height:8px; background:var(--line); border-radius:4px; overflow:hidden; }
+  #level { height:100%; width:0; background:var(--ok); border-radius:4px; transition:width .2s ease-out; }
+  #level.heard { width:100%; opacity:.45; }
+  #status { font-size:.8rem; color:var(--muted); margin-top:6px; text-align:center; }
+  #status:empty { display:none; }
+  #error { background:#ffe1e1; color:#8a1010; padding:8px 12px; border-radius:10px; margin-top:8px; font-size:.9rem; }
+
+  /* ---- ホーム */
+  .tabs { display:flex; gap:6px; overflow-x:auto; padding:4px 0 8px; scrollbar-width:none; }
+  .tab { flex:none; padding:7px 14px; border-radius:999px; border:1px solid var(--line); background:var(--card); cursor:pointer; font-size:.9rem; }
+  .tab.on { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:700; }
+  #homeFolderBar:not(:empty) { display:flex; align-items:center; justify-content:space-between; gap:8px; margin:4px 0 8px; }
+  .docCard { display:flex; align-items:center; gap:8px; background:var(--card); border-radius:14px; padding:14px 10px 14px 16px;
+             margin-bottom:8px; box-shadow:var(--shadow); cursor:pointer; }
+  .docCard:hover { outline:2px solid var(--accent-soft); }
+  .docCard.current { outline:2px solid var(--accent); }
+  .docCard .body { flex:1; min-width:0; }
+  .docCard .name { font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .docCard .info { font-size:.78rem; color:var(--muted); margin-top:2px; }
+  .docCard .preview { font-size:.85rem; color:var(--muted); margin-top:4px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .empty { color:var(--muted); text-align:center; padding:48px 12px; line-height:1.7; }
+  .fabRow { position:fixed; left:0; right:0; bottom:calc(20px + env(safe-area-inset-bottom)); z-index:6;
+            display:flex; justify-content:center; align-items:center; gap:10px; padding:0 16px; pointer-events:none; }
+  .fabRow > * { pointer-events:auto; }
+  .fab2 { border:1px solid var(--line); border-radius:999px; padding:9px 18px; font-size:.85rem; font-weight:700; cursor:pointer;
+          background:var(--card); box-shadow:0 4px 14px rgba(0,0,0,.12); line-height:1.3; }
+  body.relay .fab2 { display:none; }
+  .fab {
+         border:0; border-radius:999px; padding:16px 28px; font-size:1.1rem; font-weight:700; cursor:pointer;
+         background:var(--rec); color:#fff; box-shadow:0 6px 18px rgba(229,72,77,.4); white-space:nowrap; }
+  .recBadge { background:var(--rec); color:#fff; border:0; border-radius:999px; padding:6px 12px; font-weight:700; cursor:pointer; }
+  body.relay .docCard .iconbtn, body.relay #folderTabs > .addFolder, body.relay #homeFolderBar .iconbtn { display:none; }
+
+  /* ---- メニュー（⋯ や 話者の印を押したとき） */
+  .popmenu { position:fixed; z-index:20; min-width:220px; max-width:calc(100vw - 16px); max-height:70vh; overflow:auto; background:var(--card);
+             border-radius:14px; box-shadow:0 8px 28px rgba(0,0,0,.22); padding:6px; font-size:.95rem; }
+  .popmenu .menuTitle { font-size:.75rem; color:var(--muted); padding:6px 10px 2px; }
+  .popmenu .menuItem { display:flex; align-items:center; gap:10px; width:100%; padding:11px 10px; border:0; background:none;
+             text-align:left; border-radius:8px; cursor:pointer; }
+  .popmenu .menuItem:hover, .popmenu .menuItem.current { background:var(--accent-soft); }
+  .popmenu .menuItem.danger { color:#c62828; }
+  .popmenu .dot { width:14px; height:14px; border-radius:50%; flex:none; border:1px solid rgba(0,0,0,.15); }
+  .popmenu .check { margin-left:auto; color:var(--accent); font-weight:700; }
+  .popmenu hr { border:0; border-top:1px solid var(--line); margin:4px 0; }
+
+  /* ---- スマホをマイクにする（QRコード） */
+  .modal { position:fixed; inset:0; z-index:30; background:rgba(0,0,0,.45); display:flex; align-items:flex-end; justify-content:center; }
+  .modal[hidden] { display:none; }
+  .sheet { background:var(--card); width:100%; max-width:480px; border-radius:18px 18px 0 0; padding:18px 18px calc(18px + env(safe-area-inset-bottom)); text-align:center; }
+  @media (min-width:600px) { .modal { align-items:center; } .sheet { border-radius:18px; } }
+  .sheet h2 { font-size:1.1rem; margin:0 0 6px; }
+  .sheet p { color:var(--muted); font-size:.9rem; margin:0 0 8px; line-height:1.6; }
+  #qr { display:flex; justify-content:center; margin:10px 0; }
+  #qr img { background:#fff; padding:8px; border-radius:10px; width:220px; height:220px; image-rendering:pixelated; }
+  #phoneLink { font-size:.75rem; word-break:break-all; color:var(--muted); }
+  #pairStatus { font-weight:700; margin:8px 0; }
+
+  #toast { position:fixed; left:50%; bottom:130px; transform:translateX(-50%); background:#222; color:#fff; z-index:40;
+           padding:10px 16px; border-radius:10px; font-size:.95rem; max-width:calc(100vw - 32px); text-align:center; }
+  .footer { text-align:center; font-size:.75rem; color:var(--muted); padding:24px 0 8px; }
+  .footer a { color:inherit; }
+
+  #printArea { display:none; }
+  @media print {
+    body { background:#fff; color:#000; }
+    .app, .recbar, .fab, .modal, #toast { display:none !important; }
+    #printArea { display:block; font-family:"Yu Mincho", "Hiragino Mincho ProN", serif; }
+    #printArea h1 { font-size:18pt; margin:0 0 4pt; }
+    #printArea .date { font-size:10pt; color:#555; margin-bottom:14pt; }
+    #printArea p { font-size:11pt; line-height:1.8; margin:0 0 6pt; }
+    #printArea .meta { font-size:8pt; color:#666; margin-right:6pt; }
+  }

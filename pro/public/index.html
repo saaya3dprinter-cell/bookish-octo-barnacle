@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>音声文字起こし</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div class="app">
+  <!-- ===== ホーム（一覧） ===== -->
+  <section id="homeView" hidden>
+    <header class="appbar">
+      <h1>🎙 文字起こし</h1>
+      <button class="recBadge" id="recBadge" hidden>● 録音中</button>
+      <div class="account" id="account" hidden>
+        <span id="accountText"></span>
+        <button class="pill primary" id="login">Googleでログイン</button>
+        <button class="iconbtn" id="logout" hidden title="ログアウト">ログアウト</button>
+      </div>
+    </header>
+    <div class="notice" id="cloudNoticeHome" hidden></div>
+    <div class="content">
+      <div class="tabs" id="folderTabs"></div>
+      <div id="homeFolderBar"></div>
+      <div id="homeList"></div>
+      <div class="footer"><a href="/privacy.html">プライバシーポリシー</a></div>
+    </div>
+    <div class="fabRow">
+      <button id="homeImport" class="fab2">📁 ファイルから<br>文字起こし</button>
+      <button id="homeNew" class="fab">● 新しく録音する</button>
+    </div>
+    <input type="file" id="importFile" accept="audio/*,video/*,.m4a,.mp3,.wav,.aac,.ogg,.webm,.mp4,.mov" hidden>
+  </section>
+
+  <!-- ===== 文字起こし画面 ===== -->
+  <section id="editorView">
+    <header class="appbar">
+      <button class="iconbtn" id="homeBtn" title="一覧にもどる">‹ 一覧</button>
+      <input id="docName" placeholder="名前をつける" aria-label="文字起こしの名前">
+      <button class="savebtn" id="saveDoc">保存</button>
+      <button class="iconbtn big" id="moreBtn" title="そのほか" aria-label="そのほか">⋯</button>
+    </header>
+    <div class="subbar">
+      <select id="docFolder" aria-label="入れるフォルダ"></select>
+      <span id="docInfo"></span>
+      <span id="saveState"></span>
+    </div>
+    <div class="notice" id="cloudNotice" hidden></div>
+    <div class="notice" id="unsupported" hidden>このブラウザには「ブラウザ（簡易）」の音声認識がありません。「AI（高精度）」を使ってください。</div>
+    <div id="where" hidden></div>
+    <div class="notice" id="importBox" hidden></div>
+    <div class="content">
+      <div id="audioList"></div>
+      <div id="transcript"><div id="done"></div><p id="live" data-hint="下の「● 録音」を押して話すと&#10;ここに文字が出てきます"></p></div>
+    </div>
+    <div class="recbar">
+      <div class="inner">
+        <div class="meterRow"><span>🎤</span><div class="meter"><div id="level"></div></div><span id="levelText">停止中</span></div>
+        <div class="recrow">
+          <button id="rec">● 録音</button>
+          <button class="pill" id="pairBtn" hidden>📱 スマホを<br>マイクに</button>
+        </div>
+        <div id="status"></div>
+        <div id="error" hidden></div>
+      </div>
+    </div>
+    <!-- 使わない操作ボタン（「⋯」メニューから押す） -->
+    <div hidden>
+      <button id="newDoc"></button><button id="copy"></button><button id="word"></button>
+      <button id="pdf"></button><button id="save"></button><button id="clear"></button>
+      <select id="engine"><option value="ai">AI</option><option value="browser">ブラウザ</option></select>
+    </div>
+  </section>
+</div>
+
+<!-- スマホをマイクにする -->
+<div class="modal" id="pairCard" hidden>
+  <div class="sheet">
+    <h2>📱 スマホをマイクにする</h2>
+    <p>スマホのカメラで読み取ると、スマホで話した内容がこのPCの画面に出ます。</p>
+    <div id="qr"></div>
+    <div id="pairStatus"></div>
+    <div id="phoneLink"></div>
+    <button class="pill" id="pairClose" style="margin-top:12px">閉じる</button>
+  </div>
+</div>
+<div id="toast" hidden></div>
+<div id="printArea"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

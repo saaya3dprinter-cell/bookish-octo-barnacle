@@ -1,0 +1,2011 @@
+// 文字起こし（有料版）の画面の動き
+const params = new URLSearchParams(location.search);
+const room = params.get("room");           // ?room=xxx があれば「スマホ（マイク役）」モード
+const isPhoneMode = !!room;
+let recording = false;  // 録音中かどうか
+const $ = (id) => document.getElementById(id);
+
+$("where").textContent = isPhoneMode
+  ? "このスマホのマイクで話すと、PCの画面に文字が届きます"
+  : "このPCのマイクで録音できます。マイクがないときは下のQRコードでスマホをつなげます";
+
+// ---------------------------------------------------------- 録音データ（あとで聞ける）
+// 音そのものはこの端末の IndexedDB に、Googleにログイン中はドライブにも保存する
+let audioDbPromise = null;
+function audioDb() {
+  return audioDbPromise ||= new Promise((resolve, reject) => {
+    const r = indexedDB.open("mojiokoshi-audio", 1);
+    r.onupgradeneeded = () => r.result.createObjectStore("blobs");
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+  });
+}
+async function blobStore(mode, fn) {
+  const db = await audioDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("blobs", mode);
+    const req = fn(tx.objectStore("blobs"));
+    tx.oncomplete = () => resolve(req?.result);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+const blobPut = (id, blob) => blobStore("readwrite", (st) => st.put(blob, id));
+const blobGet = (id) => blobStore("readonly", (st) => st.get(id));
+const blobDel = (id) => blobStore("readwrite", (st) => st.delete(id));
+navigator.storage?.persist?.().catch(() => {});
+
+function audiosOf(docId) {
+  return lib.audios.filter((a) => a.docId === docId).sort((x, y) => x.start - y.start);
+}
+function deleteAudiosOf(docId) {
+  for (const a of audiosOf(docId)) blobDel(a.id).catch(() => {});
+  lib.audios = lib.audios.filter((a) => a.docId !== docId);
+}
+function saveRecording(docId, start, parts, mime) {
+  if (!parts.length) return;
+  const blob = new Blob(parts, { type: mime });
+  const duration = Math.round((Date.now() - start) / 1000);
+  if (isPhoneMode) { relaySendAudio(blob, start, duration, mime); return; }  // マイク役のスマホはPCに送る
+  saveRecordingBlob(docId, start, blob, mime, duration);
+}
+function saveRecordingBlob(docId, start, blob, mime, duration) {
+  const a = { id: uid(), docId, start, duration, mime };
+  const owner = lib.docs.find((d) => d.id === docId);
+  if (owner) owner.dirty = true;
+  blobPut(a.id, blob).then(() => {
+    lib.audios.push(a);
+    persist();
+    render();
+    // 録音の最後の文字起こしが届くのを少し待ってから、話した人を分析
+    setTimeout(() => diarizeRecording(a, blob, true), 4000);
+  }).catch(() => showError("録音データを保存できませんでした（端末の空き容量を確認してください）"));
+}
+// 「11:42:45」のような時刻から、その時間を含む録音と何秒目かを探す
+function offsetIn(a, time) {
+  const m = /^(\d{1,2}):(\d{2}):(\d{2})$/.exec(time || "");
+  if (!m) return null;
+  const d = new Date(a.start);
+  d.setHours(+m[1], +m[2], +m[3], 0);
+  const offset = (d.getTime() - a.start) / 1000;
+  return offset >= -2 && offset <= a.duration + 2 ? Math.max(0, offset) : null;
+}
+function findAudioAt(time) {
+  for (const a of audiosOf(cur().id)) {
+    const offset = offsetIn(a, time);
+    if (offset !== null) return { audio: a, offset: Math.max(0, offset - 0.5) };
+  }
+  return null;
+}
+
+// ---------------------------------------------------------- 話者（A・B・C…）
+// 録音が終わったら、録音全体を AI に送って「何秒にだれが話したか」を調べ、
+// 文章の行ごとに一番長く話していた人を A・B・C… として付ける。名前は録音ごとに変えられる。
+const SPEAKER_COLORS = ["#ffe3cc", "#d8ecff", "#dff5e1", "#f3e0ff", "#fff3b8", "#ffd9de"];
+const speakerLabel = (e) => e.speakerName || e.speaker;
+const speakerColor = (key) => SPEAKER_COLORS[(key.charCodeAt(0) - 65) % SPEAKER_COLORS.length];
+
+// 話者を選ぶ範囲：録音があればその録音の行、なければ「録音のない行」どうし
+function scopeOf(a) {
+  const doc = cur();
+  return a ? doc.entries.filter((x) => offsetIn(a, x.time) !== null) : doc.entries.filter((x) => !findAudioAt(x.time));
+}
+// quiet = 録音直後の自動分析（うまくいかなくても静かにする）
+async function diarizeRecording(a, blob, quiet = false) {
+  const doc = lib.docs.find((d) => d.id === a.docId);
+  if (!doc?.entries?.some((e) => offsetIn(a, e.time) !== null)) {
+    if (!quiet) toast("この録音の時間に文字がないため、話者を分けられませんでした");
+    return;
+  }
+  try {
+    const res = await fetch("/api/diarize", { method: "POST", body: blob, headers: { "Content-Type": a.mime.split(";")[0] } });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast(data.error === "quota"
+        ? "今日のAIの無料分を使い切ったため、話した人の分析はできませんでした（明日また使えます）"
+        : "話した人の分析がうまくいきませんでした。少しあとでもう一度お試しください");
+      return;
+    }
+    if (!data.words?.length) {
+      if (!quiet) toast("声をうまく聞き取れず、話者を分けられませんでした。行の印を押すと手で選べます");
+      return;
+    }
+    assignSpeakers(a, data.words);
+  } catch (_) {
+    if (!quiet) toast("サーバーにつながらず、話者を分けられませんでした");
+  }
+}
+function assignSpeakers(a, words) {
+  const doc = lib.docs.find((d) => d.id === a.docId);
+  if (!doc?.entries) return;
+  // 話した順に A, B, C…
+  const letters = {};
+  for (const w of words) if (!(w.sp in letters)) letters[w.sp] = String.fromCharCode(65 + Object.keys(letters).length);
+  // ある時間に話していた人（重なりが一番長い人。だれとも重ならなければ一番近い人）
+  const who = (from, to) => {
+    const talk = {};
+    for (const w of words) {
+      const overlap = Math.min(to, w.e) - Math.max(from, w.s);
+      if (overlap > 0) talk[w.sp] = (talk[w.sp] || 0) + overlap;
+    }
+    const best = Object.entries(talk).sort((x, y) => y[1] - x[1])[0];
+    if (best) return letters[best[0]];
+    let near = null, dist = Infinity;
+    for (const w of words) {
+      const d = Math.min(Math.abs(w.s - to), Math.abs(w.e - from));
+      if (d < dist) { dist = d; near = w; }
+    }
+    return near && dist < 3 ? letters[near.sp] : null;
+  };
+  const names = {};  // 前に付けた名前は残す
+  const inRec = doc.entries.filter((e) => offsetIn(a, e.time) !== null);
+  for (const e of inRec) if (e.speaker && e.speakerName) names[e.speaker] = e.speakerName;
+  const timeAt = (sec) => new Date(a.start + sec * 1000).toLocaleTimeString("ja-JP");
+
+  const out = [];
+  for (const e of doc.entries) {
+    const o = offsetIn(a, e.time);
+    if (o === null) { out.push(e); continue; }
+    if (e.w?.length) {
+      // 単語ごとに話者を決めて、話者が変わるところで行を分ける
+      const groups = [];
+      let last = null;
+      for (const [t, s0, e0] of e.w) {
+        const sp = who(o + s0, o + (Number.isFinite(e0) ? e0 : s0 + 0.3)) || last;
+        if (!groups.length || sp !== groups[groups.length - 1].sp) groups.push({ sp, words: [] });
+        groups[groups.length - 1].words.push([t, s0, e0]);
+        last = sp;
+      }
+      // 1〜2単語だけのかけらは、前の人の行にくっつける（誤判定で細切れにならないように）
+      const merged = [];
+      for (const g of groups) {
+        const short = g.words.map((w) => w[0]).join("").trim().length <= 2;
+        if (merged.length && (short || g.sp === null || g.sp === merged[merged.length - 1].sp)) merged[merged.length - 1].words.push(...g.words);
+        else merged.push(g);
+      }
+      for (const g of merged) {
+        const first = g.words[0][1];
+        const piece = {
+          time: merged.length > 1 ? timeAt(o + first) : e.time,
+          source: e.source,
+          text: g.words.map((w) => w[0]).join("").trim(),
+          w: g.words.map(([t, s0, e0]) => [t, Math.round((s0 - first) * 100) / 100, Math.round((e0 - first) * 100) / 100]),
+        };
+        if (!piece.text) continue;
+        if (g.sp) piece.speaker = g.sp;
+        if (g.sp && names[g.sp]) piece.speakerName = names[g.sp];
+        out.push(piece);
+      }
+      continue;
+    }
+    // 単語の時間がない行は、その行で一番長く話した人にする
+    const next = inRec.map((x) => offsetIn(a, x.time)).filter((x) => x > o).sort((x, y) => x - y)[0];
+    const sp = who(o, next ?? a.duration + 1);
+    if (sp) { e.speaker = sp; if (names[sp]) e.speakerName = names[sp]; else delete e.speakerName; }
+    out.push(e);
+  }
+  doc.entries.splice(0, doc.entries.length, ...out);
+  doc.updatedAt = Date.now();
+  doc.dirty = true;
+  persist();
+  render();
+  const count = Object.keys(letters).length;
+  toast(count > 1
+    ? `話した人を分けました（${count}人）。A・Bの印を押すと、話者や名前を変えられます`
+    : "1人の声と判断されました。違うときは、行の印を押して話者を選べます");
+}
+// 1行だけ、話者を変える（同じ録音で同じ人に名前があれば、その名前になる）
+function setSpeaker(e, a, key) {
+  // QRでつないだスマホは、PCに「この行の話者を変えて」と頼む（PCが変えて、結果がスマホにも戻ってくる）
+  if (isPhoneMode) relayRoom?.send({ type: "speaker", time: e.time, text: e.text, key });
+  const doc = cur();
+  const same = scopeOf(a);
+  e.speaker = key;
+  const name = same.find((x) => x !== e && x.speaker === key && x.speakerName)?.speakerName;
+  if (name) e.speakerName = name; else delete e.speakerName;
+  doc.updatedAt = Date.now();
+  doc.dirty = true;
+  persist();
+  render();
+}
+// 話者の印を押したときのメニュー：だれが話したかを選ぶ・名前を変える
+// ---------------------------------------------------------- 押すと出るメニュー（⋯ や 話者の印）
+// items: [{ label, onClick, color, current, danger }] または "-"（区切り線）
+function openMenu(anchor, title, items) {
+  closeMenu();
+  const menu = document.createElement("div");
+  menu.id = "popMenu";
+  menu.className = "popmenu";
+  if (title) {
+    const t = document.createElement("div");
+    t.className = "menuTitle";
+    t.textContent = title;
+    menu.append(t);
+  }
+  for (const it of items) {
+    if (it === "-") { menu.append(document.createElement("hr")); continue; }
+    const b = document.createElement("button");
+    b.className = "menuItem" + (it.current ? " current" : "") + (it.danger ? " danger" : "");
+    if (it.color) {
+      const dot = document.createElement("span");
+      dot.className = "dot";
+      dot.style.background = it.color;
+      b.append(dot);
+    }
+    b.append(document.createTextNode(it.label));
+    if (it.current) {
+      const check = document.createElement("span");
+      check.className = "check";
+      check.textContent = "✓";
+      b.append(check);
+    }
+    b.onclick = (ev) => { ev.stopPropagation(); closeMenu(); it.onClick(); };
+    menu.append(b);
+  }
+  document.body.append(menu);
+  // 押したところのすぐ下に出す（画面からはみ出さないように）
+  const r = anchor.getBoundingClientRect();
+  const w = menu.offsetWidth, h = menu.offsetHeight;
+  menu.style.left = Math.max(8, Math.min(r.left, innerWidth - w - 8)) + "px";
+  menu.style.top = (r.bottom + h + 8 < innerHeight ? r.bottom + 4 : Math.max(8, r.top - h - 4)) + "px";
+  setTimeout(() => document.addEventListener("click", closeMenu, { once: true }), 0);
+}
+function closeMenu() {
+  document.getElementById("popMenu")?.remove();
+}
+document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") closeMenu(); });
+window.addEventListener("scroll", closeMenu, true);
+
+// 話者の印を押したときのメニュー：だれが話したかを選ぶ・名前を変える
+function openSpeakerMenu(anchor, e, a) {
+  const same = scopeOf(a);
+  const people = {};
+  for (const x of same) if (x.speaker && !(x.speaker in people)) people[x.speaker] = "";
+  for (const x of same) if (x.speaker && x.speakerName) people[x.speaker] = x.speakerName;
+  const keys = Object.keys(people).sort();
+  let next = "A";
+  while (keys.includes(next) && next < "Z") next = String.fromCharCode(next.charCodeAt(0) + 1);
+  openMenu(anchor, "この行を話したのは", [
+    ...keys.map((k) => ({ label: people[k] ? `${k}　${people[k]}` : k, color: speakerColor(k), current: e.speaker === k, onClick: () => setSpeaker(e, a, k) })),
+    { label: `＋ 新しい人（${next}）`, onClick: () => setSpeaker(e, a, next) },
+    ...(e.speaker ? ["-", { label: `✏ 「${speakerLabel(e)}」の名前を変える`, onClick: () => renameSpeaker(a, e.speaker) }] : []),
+  ]);
+}
+// 録音ごとに、話者の名前を付け替える
+function renameSpeaker(a, key) {
+  const rows = scopeOf(a).filter((e) => e.speaker === key);
+  const now = rows.find((e) => e.speakerName)?.speakerName || "";
+  const name = prompt(`話者「${key}」の名前（${a ? "この録音の中だけ" : "録音のない行の中だけ"}変わります。空にすると ${key} に戻ります）`, now);
+  if (name === null) return;
+  if (isPhoneMode) relayRoom?.send({ type: "rename", audioId: a?.id || "", key, name });
+  applyRename(a, key, name);
+}
+function applyRename(a, key, name) {
+  const doc = cur();
+  const rows = scopeOf(a).filter((e) => e.speaker === key);
+  for (const e of rows) {
+    if (name.trim()) e.speakerName = name.trim(); else delete e.speakerName;
+  }
+  doc.updatedAt = Date.now();
+  doc.dirty = true;
+  persist();
+  render();
+}
+const audioUrls = {};
+async function audioUrl(a) {
+  if (audioUrls[a.id]) return audioUrls[a.id];
+  let blob = await blobGet(a.id).catch(() => null);
+  if (!blob && isPhoneMode) blob = await relayFetchAudio(a);  // QRでつないだスマホは、PCから取り寄せる
+  if (!blob && a.driveId && cloud.on) {
+    blob = await gfetch(`/drive/v3/files/${a.driveId}?alt=media`, { raw: true });
+    blobPut(a.id, blob).catch(() => {});
+  }
+  if (!blob) return null;
+  return (audioUrls[a.id] = URL.createObjectURL(blob));
+}
+let audioListKey = "";
+function renderAudioList() {
+  const list = audiosOf(cur().id);
+  const speakers = cur().entries.map((e) => (e.speaker || "") + (e.speakerName || "")).join(",");
+  const key = cur().id + ":" + list.map((a) => a.id).join(",") + ":" + speakers;
+  if (key === audioListKey) return;  // 再生中に作り直さないように
+  audioListKey = key;
+  $("audioList").replaceChildren(...list.map((a, i) => {
+    const row = document.createElement("div");
+    row.className = "audioItem";
+    row.dataset.id = a.id;
+    const label = document.createElement("span");
+    const d = new Date(a.start);
+    label.textContent = `🔊 録音${i + 1}（${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}〜 ${Math.floor(a.duration / 60)}分${a.duration % 60}秒）`;
+    const player = document.createElement("audio");
+    player.controls = true;
+    player.preload = "none";
+    const load = button("▶ 聞く", async () => { await loadPlayer(a, player, load); player.play(); });
+    row.append(label, load);
+    // この録音の話者（押すと名前変更）と「話者を分け直す」
+    const keys = [...new Set(cur().entries.filter((e) => e.speaker && offsetIn(a, e.time) !== null).map((e) => e.speaker))].sort();
+    const people = document.createElement("span");
+    for (const k of keys) {
+      const sample = cur().entries.find((e) => e.speaker === k && offsetIn(a, e.time) !== null);
+      const chip = document.createElement("button");
+      chip.className = "tag speaker";
+      chip.style.background = speakerColor(k);
+      chip.style.border = "0";
+      chip.textContent = `${k}${sample.speakerName ? "：" + sample.speakerName : ""}`;
+      chip.onclick = () => renameSpeaker(a, k);
+      people.append(chip);
+    }
+    if (!isPhoneMode) {
+      people.append(button(keys.length ? "話者を分け直す" : "👥 話者を分ける", async () => {
+        toast("話した人を分析しています…");
+        const blob = await blobGet(a.id).catch(() => null) || (a.driveId && cloud.on ? await gfetch(`/drive/v3/files/${a.driveId}?alt=media`, { raw: true }).catch(() => null) : null);
+        if (blob) diarizeRecording(a, blob); else toast("この端末に録音データがありません");
+      }));
+    }
+    row.append(people);
+    blobGet(a.id).then((b) => { if (b) loadPlayer(a, player, load); }).catch(() => {});
+    return row;
+  }));
+}
+async function loadPlayer(a, player, loadBtn) {
+  if (player.src) return;
+  loadBtn.textContent = "読み込み中…";
+  try {
+    const url = await audioUrl(a);
+    if (!url) { loadBtn.textContent = "この端末にありません"; return; }
+    player.addEventListener("error", () => {
+      const msg = document.createElement("span");
+      msg.textContent = "この端末では再生できない形式です（PCのChromeで再生してください）";
+      player.replaceWith(msg);
+    }, { once: true });
+    player.src = url;
+    loadBtn.replaceWith(player);
+    await fixDuration(player);
+  } catch (e) {
+    loadBtn.textContent = "読み込めませんでした";
+  }
+}
+// ブラウザで録音した webm は長さが「不明」になり、途中から再生しにくいので直す
+function fixDuration(player) {
+  return new Promise((resolve) => {
+    const done = () => { player.currentTime = 0; resolve(); };
+    const check = () => {
+      if (player.duration !== Infinity && !Number.isNaN(player.duration)) return resolve();
+      player.addEventListener("durationchange", () => { if (player.duration !== Infinity) done(); }, { once: true });
+      player.currentTime = 1e101;
+    };
+    if (player.readyState >= 1) check(); else player.addEventListener("loadedmetadata", check, { once: true });
+    setTimeout(resolve, 3000);
+  });
+}
+async function playAudioAt(a, offset) {
+  const row = $("audioList").querySelector(`[data-id="${a.id}"]`);
+  if (!row) return;
+  let player = row.querySelector("audio");
+  if (!player || !player.src) {
+    const btn = row.querySelector("button");
+    player = document.createElement("audio");
+    player.controls = true;
+    await loadPlayer(a, player, btn);
+    if (!player.src) return;
+  }
+  const go = () => { player.currentTime = offset; player.play(); };
+  if (player.readyState >= 1) go(); else player.addEventListener("loadedmetadata", go, { once: true });
+}
+
+// ---------------------------------------------------------- 保存データ（フォルダ・文字起こし）
+// { folders:[{id,name}], docs:[{id,name,folderId,createdAt,updatedAt,entries:[{time,source,text}]}], currentId }
+const DB_KEY = "mojiokoshi-library-v1";
+const cloud = { on: false };  // Googleドライブ保存（下のほうで設定）
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+let lib = null;
+// QRコードでつないだ「マイク役」のスマホは、PCに送るだけでスマホには保存しない
+if (!isPhoneMode) try { lib = JSON.parse(localStorage.getItem(DB_KEY) || "null"); } catch (_) {}
+if (!lib || !Array.isArray(lib.docs)) lib = { folders: [], docs: [], currentId: null };
+lib.audios ||= [];  // 録音データの一覧 [{id, docId, start, duration, mime, driveId}]（音そのものは IndexedDB）
+// 以前のバージョンの結果があれば1つの文字起こしとして引き継ぐ
+if (!isPhoneMode) try {
+  const old = JSON.parse(localStorage.getItem("transcripts-v1") || "[]");
+  if (old.length) {
+    lib.docs.push({ id: uid(), name: "以前の文字起こし", folderId: "", createdAt: Date.now(), updatedAt: Date.now(), entries: old });
+    localStorage.removeItem("transcripts-v1");
+  }
+} catch (_) {}
+let storeKey = isPhoneMode ? null : DB_KEY;
+// QRでつないだスマホとのやりとり（PC側: つながっているスマホ / スマホ側: 録音を送る関数）
+let relayRoom = null;        // 中継サーバーとのつながり
+let relayPeerSeen = false;   // PC側: スマホがつながっているか
+let relayTimer = null;
+let relayOpen = null, relayNew = null;  // スマホ側: PCに「開いて」「新しく作って」と頼む
+let relaySendAudio = () => {};          // スマホ側: 録音をPCに送る
+let relayFetchAudio = async () => null; // スマホ側: PCにある録音を取り寄せる
+const audioWaiters = {};
+// PCの一覧と、開いている文字起こしの中身を、つながっているスマホに送る
+function relaySync() {
+  if (isPhoneMode || !relayRoom || !relayPeerSeen || !lib.docs.length) return;
+  clearTimeout(relayTimer);
+  relayTimer = setTimeout(() => {
+    const doc = cur();
+    const msg = {
+      type: "lib",
+      folders: lib.folders.map((f) => ({ id: f.id, name: f.name })),
+      docs: lib.docs.map((d) => ({ id: d.id, name: d.name, folderId: d.folderId, createdAt: d.createdAt, updatedAt: d.updatedAt, count: countOf(d) })),
+      current: { id: doc.id, entries: doc.entries || [] },
+      audios: audiosOf(doc.id).map(({ id, docId, start, duration, mime }) => ({ id, docId, start, duration, mime })),
+    };
+    relayRoom.send(msg);
+  }, 300);
+}
+// 保存の考え方
+// - 文章・名前・録音は「💾 保存」を押したときだけ Googleドライブに保存する
+// - 消える心配がないように、この端末の中には下書きとして黙って残しておく（画面を閉じても消えない）
+// - 削除・フォルダ移動など、ホームでの操作はその場でドライブにも反映する
+function setSaveState(text) { const el = document.getElementById("saveState"); if (el) el.textContent = text; }
+const hhmm = () => { const d = new Date(); return `${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`; };
+function persist() {
+  if (storeKey) {
+    try {
+      localStorage.setItem(storeKey, cloud.on ? JSON.stringify({ lib, snap: cloud.snap }) : JSON.stringify(lib));
+    } catch (_) {
+      setSaveState("⚠ この端末に下書きを残せませんでした（空き容量を確認してください）");
+    }
+  }
+  if (cloud.on) cloudChanged();
+  relaySync();
+  showSaveState();
+}
+// 保存していない変更があるか
+function isUnsaved(d) {
+  if (cloud.on) {
+    const s = cloud.snap.docs[d.id];
+    if (!s) return !!d.entries?.length || !/^文字起こし \d+\/\d+ \d+:\d{2}$/.test(d.name);
+    return (d.entries && s.sig !== sig(d.entries)) || s.name !== d.name || lib.audios.some((a) => a.docId === d.id && !a.driveId);
+  }
+  return !!d.dirty;
+}
+function showSaveState() {
+  if (isPhoneMode || !lib.docs.length) return;
+  const d = cur();
+  const unsaved = isUnsaved(d);
+  const el = document.getElementById("saveState");
+  if (el) el.classList.toggle("unsaved", unsaved);
+  setSaveState(unsaved ? "● 未保存" : d.savedAt ? `✓ 保存済み ${d.savedAt}` : "");
+  $("saveDoc").classList.toggle("saved", !unsaved);
+  $("saveDoc").textContent = unsaved ? "保存" : "保存済み";
+}
+window.addEventListener("beforeunload", (e) => {
+  if (!isPhoneMode && lib.docs.some(isUnsaved)) { e.preventDefault(); e.returnValue = ""; }
+});
+
+function defaultName() {
+  const d = new Date();
+  return `文字起こし ${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+function newDoc(folderId = "") {
+  const doc = { id: uid(), name: defaultName(), folderId, createdAt: Date.now(), updatedAt: Date.now(), entries: [] };
+  lib.docs.push(doc);
+  lib.currentId = doc.id;
+  persist();
+  return doc;
+}
+function cur() {
+  return lib.docs.find((d) => d.id === lib.currentId) || lib.docs[lib.docs.length - 1] || newDoc();
+}
+lib.currentId = cur().id;
+if (!cur().entries) cur().entries = [];
+let entries = cur().entries;
+
+function openDoc(id) {
+  if (isPhoneMode && relayOpen && id !== lib.currentId) { relayOpen(id); return; }
+  lib.currentId = id;
+  const doc = cur();
+  if (!doc.entries) {
+    // ドライブから中身をまだ読み込んでいない
+    doc.entries = [];
+    entries = doc.entries;
+    renderAll();
+    cloudLoadDoc(doc).then(renderAll);
+    return;
+  }
+  entries = doc.entries;
+  persist();
+  setLive("");
+  renderAll();
+}
+const countOf = (d) => (d.entries ? d.entries.length : d.count || 0);
+function folderName(id) {
+  return lib.folders.find((f) => f.id === id)?.name || "未分類";
+}
+function fmtDate(t) {
+  const d = new Date(t);
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+function render() {
+  $("done").replaceChildren(...entries.map((e) => {
+    const para = document.createElement("p");
+    const meta = document.createElement("span");
+    meta.className = "meta";
+    meta.textContent = e.time;
+    const hit = findAudioAt(e.time);
+    const tag = document.createElement("span");
+    if (e.speaker) {
+      // 話者（押すと「だれが話したか」を選べる）
+      tag.className = "tag speaker";
+      tag.style.background = speakerColor(e.speaker);
+      tag.textContent = speakerLabel(e) + " ▾";
+    } else {
+      tag.className = "tag" + (e.source === "スマホ" ? " phone" : "");
+      tag.textContent = e.source + " ▾";
+    }
+    {
+      tag.classList.add("pick");
+      tag.title = "押すと、だれが話したかを選べます";
+      tag.onclick = (ev) => { ev.stopPropagation(); openSpeakerMenu(tag, e, hit?.audio); };
+    }
+    meta.append(tag);
+    para.append(meta, document.createTextNode(e.text));
+    if (hit) {
+      para.className = "seek";
+      para.title = "押すとこの部分の録音を再生";
+      para.onclick = () => playAudioAt(hit.audio, hit.offset);
+    }
+    return para;
+  }));
+  renderAudioList();
+  setRecLabel();
+  $("docInfo").textContent = entries.length ? `${entries.length}件` : "";
+  showSaveState();
+  scrollToEnd();
+}
+function renderDocBar() {
+  const doc = cur();
+  if (document.activeElement !== $("docName")) $("docName").value = isPhoneMode ? "💻 PCの「" + doc.name + "」に送っています" : doc.name;
+  const sel = $("docFolder");
+  sel.replaceChildren(
+    new Option("📁 未分類", ""),
+    ...lib.folders.map((f) => new Option("📁 " + f.name, f.id)),
+    new Option("＋ 新しいフォルダ…", "__new"),
+  );
+  sel.value = doc.folderId || "";
+  relaySync();
+}
+// ---------------------------------------------------------- ホーム（フォルダごとの一覧）
+let homeFolder = "all";
+function renderHome() {
+  if (homeFolder !== "all" && homeFolder !== "" && !lib.folders.some((f) => f.id === homeFolder)) homeFolder = "all";
+  const tab = (label, id) => {
+    const b = document.createElement("button");
+    b.className = "tab" + (homeFolder === id ? " on" : "");
+    b.textContent = label;
+    b.onclick = () => { homeFolder = id; renderHome(); };
+    return b;
+  };
+  const count = (id) => lib.docs.filter((d) => id === "all" || (d.folderId || "") === id).length;
+  const add = tab("＋ フォルダ", "__add");
+  add.classList.add("addFolder");
+  add.onclick = () => { const f = createFolder(); if (f) { homeFolder = f.id; renderAll(); } };
+  $("folderTabs").replaceChildren(
+    tab(`すべて ${count("all")}`, "all"),
+    tab(`未分類 ${count("")}`, ""),
+    ...lib.folders.map((f) => tab(`📁 ${f.name} ${count(f.id)}`, f.id)),
+    add,
+  );
+
+  // 選んでいるフォルダの名前変更・削除（⋯ メニュー）
+  const bar = $("homeFolderBar");
+  const folder = lib.folders.find((f) => f.id === homeFolder);
+  bar.replaceChildren();
+  if (folder) {
+    const title = document.createElement("strong");
+    title.textContent = "📁 " + folder.name;
+    const more = document.createElement("button");
+    more.className = "iconbtn big";
+    more.textContent = "⋯";
+    more.title = "フォルダの操作";
+    more.onclick = (ev) => {
+      ev.stopPropagation();
+      openMenu(more, "フォルダ「" + folder.name + "」", [
+        { label: "✏ 名前を変える", onClick: () => { const n = prompt("フォルダの名前", folder.name); if (n?.trim()) { folder.name = n.trim(); persist(); renderAll(); } } },
+        { label: "🗑 フォルダを削除（中身は未分類へ）", danger: true, onClick: () => {
+          if (!confirm(`フォルダ「${folder.name}」を削除しますか？\n中の文字起こしは「未分類」に移ります。`)) return;
+          lib.docs.forEach((d) => { if (d.folderId === folder.id) d.folderId = ""; });
+          lib.folders = lib.folders.filter((x) => x !== folder);
+          homeFolder = "all";
+          persist(); renderAll();
+        } },
+      ]);
+    };
+    bar.append(title, more);
+  }
+
+  const docs = lib.docs
+    .filter((d) => homeFolder === "all" || (d.folderId || "") === homeFolder)
+    .filter((d) => countOf(d) || isUnsaved(d) || d.id === lib.currentId || !/^文字起こし \d+\/\d+ \d+:\d{2}$/.test(d.name))
+    .sort((x, y) => y.updatedAt - x.updatedAt);
+  if (!docs.length) {
+    const e = document.createElement("div");
+    e.className = "empty";
+    e.textContent = "まだ文字起こしがありません。\n下の「● 新しく録音する」から始めましょう。";
+    e.style.whiteSpace = "pre-line";
+    $("homeList").replaceChildren(e);
+    return;
+  }
+  $("homeList").replaceChildren(...docs.map((d) => {
+    const card = document.createElement("div");
+    card.className = "docCard" + (d.id === lib.currentId ? " current" : "");
+    card.onclick = () => { openDoc(d.id); showView("editor"); };
+    const body = document.createElement("div");
+    body.className = "body";
+    const name = document.createElement("div");
+    name.className = "name";
+    name.textContent = d.name;
+    const info = document.createElement("div");
+    info.className = "info";
+    const audios = audiosOf(d.id).length;
+    info.textContent = [fmtDate(d.updatedAt), `${countOf(d)}件`, audios ? `🔊 ${audios}` : "",
+      homeFolder === "all" && d.folderId ? `📁 ${folderName(d.folderId)}` : "", isUnsaved(d) ? "● 未保存" : ""].filter(Boolean).join("　");
+    body.append(name, info);
+    const first = d.entries?.find((e) => e.text);
+    if (first) {
+      const pv = document.createElement("div");
+      pv.className = "preview";
+      pv.textContent = first.text;
+      body.append(pv);
+    }
+    const more = document.createElement("button");
+    more.className = "iconbtn big";
+    more.textContent = "⋯";
+    more.title = "移動・削除";
+    more.onclick = (ev) => {
+      ev.stopPropagation();
+      openMenu(more, d.name, [
+        { label: "開く", onClick: () => { openDoc(d.id); showView("editor"); } },
+        "-",
+        ...[{ id: "", name: "未分類" }, ...lib.folders].map((f) => ({
+          label: `📁 ${f.name} へ移動`, current: (d.folderId || "") === f.id,
+          onClick: () => { d.folderId = f.id; persist(); renderAll(); },
+        })),
+        { label: "📁＋ 新しいフォルダを作って移動", onClick: () => {
+          const f = createFolder();
+          if (f) { d.folderId = f.id; persist(); renderAll(); toast(`「${f.name}」を作って移動しました`); }
+        } },
+        "-",
+        { label: "🗑 削除", danger: true, onClick: () => {
+          if (!confirm(cloud.on ? `「${d.name}」を削除しますか？（Googleドライブのゴミ箱に移ります）` : `「${d.name}」を削除しますか？（元に戻せません）`)) return;
+          lib.docs = lib.docs.filter((x) => x !== d);
+          deleteAudiosOf(d.id);
+          if (lib.currentId === d.id) { lib.currentId = null; openDoc(cur().id); }
+          persist(); renderAll();
+        } },
+      ]);
+    };
+    card.append(body, more);
+    return card;
+  }));
+}
+
+// 画面の切り替え（ホーム ⇔ 文字起こし）
+function showView(name) {
+  const home = name === "home";
+  $("homeView").hidden = !home;
+  $("editorView").hidden = home;
+  closeMenu();
+  if (home) renderHome();
+  const hash = home ? "#home" : "";
+  if (location.hash !== hash) history.pushState(null, "", hash || location.pathname + location.search);
+  window.scrollTo({ top: 0 });
+}
+window.addEventListener("popstate", () => showView(location.hash === "#home" ? "home" : "editor"));
+$("homeBtn").onclick = () => showView("home");
+// 「⋯」メニュー：出力・新規・設定など、たまに使うもの
+$("moreBtn").onclick = (ev) => {
+  ev.stopPropagation();
+  const items = [
+    { label: "📋 文章をコピー", onClick: () => $("copy").click() },
+    { label: "📄 Word で出力", onClick: () => $("word").click() },
+    { label: "🧾 PDF で出力", onClick: () => $("pdf").click() },
+    { label: "📝 テキスト（.txt）で出力", onClick: () => $("save").click() },
+  ];
+  if (!isPhoneMode && !$("account").hidden) {
+    items.push("-", cloud.on
+      ? { label: `👤 ${cloud.email}（ログアウト）`, onClick: () => $("logout").click() }
+      : { label: "🔑 Googleでログイン（ドライブに保存）", onClick: () => $("login").click() });
+  }
+  if (!isPhoneMode) {
+    items.push("-",
+      { label: "＋ 新しい文字起こし", onClick: () => $("newDoc").click() },
+      "-",
+      { label: "文字にする方法：AI（高精度）", current: engine === "ai", onClick: () => { $("engine").value = "ai"; $("engine").onchange(); } },
+      { label: "文字にする方法：ブラウザ（簡易）", current: engine === "browser", onClick: () => { $("engine").value = "browser"; $("engine").onchange(); } },
+      "-",
+      { label: "🗑 この中身をすべて消す", danger: true, onClick: () => $("clear").click() });
+  }
+  openMenu($("moreBtn"), "", items);
+};
+$("recBadge").onclick = () => showView("editor");
+// 「● 新しく録音する」：新しい文字起こしを作って、すぐ録音を始める
+$("homeNew").onclick = () => {
+  if (isPhoneMode) { relayNew?.(homeFolder === "all" ? "" : homeFolder); showView("editor"); if (!recording) startRec(); return; }
+  const doc = newDoc(homeFolder === "all" ? "" : homeFolder);
+  openDoc(doc.id);
+  showView("editor");
+  if (!recording) startRec();
+};
+
+$("saveDoc").onclick = async () => {
+  const doc = cur();
+  const name = $("docName").value.trim();
+  if (name) doc.name = name;
+  if (cloud.on) {
+    $("saveDoc").disabled = true;
+    setSaveState("☁ ドライブに保存中…");
+    const ok = await cloudSync(true);
+    $("saveDoc").disabled = false;
+    if (!ok) { toast("ドライブに保存できませんでした（この端末には残っています）"); showSaveState(); return; }
+  }
+  for (const d of lib.docs) d.dirty = false;
+  doc.savedAt = hhmm();
+  persist();
+  toast(cloud.on ? "Googleドライブに保存しました" : "保存しました");
+};
+function toast(msg) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.hidden = false;
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => { t.hidden = true; }, 2200);
+}
+
+function button(label, onclick) {
+  const b = document.createElement("button");
+  b.className = "small";
+  b.textContent = label;
+  b.onclick = onclick;
+  return b;
+}
+function renderAll() { render(); renderDocBar(); if (!$("homeView").hidden) renderHome(); }
+
+function createFolder() {
+  const n = prompt("新しいフォルダの名前（例：お客さん名、作品名）");
+  if (!n?.trim()) return null;
+  const f = { id: uid(), name: n.trim() };
+  lib.folders.push(f);
+  persist();
+  return f;
+}
+
+$("docName").oninput = () => {
+  cur().name = $("docName").value.trim() || defaultName();
+  cur().dirty = true;
+  persist();
+};
+$("docName").onblur = () => renderDocBar();
+$("docFolder").onchange = () => {
+  let id = $("docFolder").value;
+  if (id === "__new") id = createFolder()?.id ?? cur().folderId;
+  cur().folderId = id;
+  persist();
+  renderAll();
+};
+$("newDoc").onclick = () => {
+  const doc = newDoc(cur().folderId);  // 今のフォルダに新しく作る
+  openDoc(doc.id);
+  $("docName").focus();
+  $("docName").select();
+};
+
+// 話している途中の文字（まだ確定していない部分）をそのまま表示
+function setLive(text) {
+  $("live").textContent = text;
+  scrollToEnd();
+}
+// 録音中や、いちばん下を見ているときは、新しい文字が見えるように下までスクロール
+function scrollToEnd() {
+  const nearBottom = innerHeight + scrollY > document.body.scrollHeight - 260;
+  if (recording || nearBottom) window.scrollTo({ top: document.body.scrollHeight });
+}
+// words: [[単語, 何秒目から, 何秒目まで], …]（行の最初からの秒数。話者を分けるときに使う）
+function addEntry(source, text, at = Date.now(), words) {
+  text = text.trim();
+  if (!text) return;
+  const e = { time: new Date(at).toLocaleTimeString("ja-JP"), source, text };
+  if (Array.isArray(words) && words.length) e.w = words;
+  entries.push(e);
+  cur().updatedAt = Date.now();
+  cur().dirty = true;
+  persist();
+  render();
+}
+renderAll();
+// 最初は一覧（ホーム）から（ログインボタンもここ）
+if (!isPhoneMode) {
+  $("homeView").hidden = false;
+  $("editorView").hidden = true;
+  renderHome();
+  history.replaceState(null, "", location.pathname + location.search + "#home");
+}
+
+$("copy").onclick = async () => {
+  const text = entries.map((e) => (e.speaker ? speakerLabel(e) + "：" : "") + e.text).join("\n");
+  try { await navigator.clipboard.writeText(text); alert("コピーしました"); }
+  catch (_) { prompt("コピーしてください", text); }
+};
+// ---------------------------------------------------------- 出力（txt / Word / PDF）
+function downloadBlob(blob, filename) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+// ファイル名に使えない記号を消す
+function fileBase() {
+  return cur().name.replace(/[\\/:*?"<>|]/g, "_").trim() || "mojiokoshi";
+}
+function hasEntries() {
+  if (entries.length) return true;
+  alert("まだ文字起こしがありません");
+  return false;
+}
+
+$("save").onclick = () => {
+  if (!hasEntries()) return;
+  const text = entries.map((e) => (e.speaker ? speakerLabel(e) + "：" : "") + e.text).join("\n");
+  downloadBlob(new Blob([text], { type: "text/plain" }), `${fileBase()}.txt`);
+};
+
+// Word（.docx）: ライブラリは大きいので、ボタンを押したときだけ読み込む
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const el = document.createElement("script");
+    el.src = src;
+    el.onload = resolve;
+    el.onerror = () => reject(new Error("読み込み失敗"));
+    document.head.append(el);
+  });
+}
+$("word").onclick = async () => {
+  if (!hasEntries()) return;
+  const btn = $("word");
+  btn.disabled = true;
+  btn.textContent = "作成中…";
+  try {
+    if (!window.docx) await loadScript("https://cdn.jsdelivr.net/npm/docx@9.5.1/dist/index.iife.js");
+    const { Document, Packer, Paragraph, TextRun, HeadingLevel } = window.docx;
+    const font = { ascii: "Yu Gothic", eastAsia: "Yu Gothic", hAnsi: "Yu Gothic" };
+    const doc = new Document({
+      styles: { default: { document: { run: { font, size: 22 } } } },
+      sections: [{
+        children: [
+          new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun({ text: cur().name, font })] }),
+          new Paragraph({ children: [new TextRun({ text: `${fmtDate(cur().createdAt)} ・ ${folderName(cur().folderId)}`, color: "666666", size: 20 })] }),
+          new Paragraph({}),
+          ...entries.map((e) => new Paragraph({
+            spacing: { after: 120 },
+            children: [
+              ...(e.speaker ? [new TextRun({ text: speakerLabel(e) + "：", bold: true })] : []),
+              new TextRun({ text: e.text }),
+            ],
+          })),
+        ],
+      }],
+    });
+    downloadBlob(await Packer.toBlob(doc), `${fileBase()}.docx`);
+  } catch (err) {
+    alert("Wordファイルを作れませんでした: " + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Word";
+  }
+};
+
+// PDF: 印刷画面を開く →「送信先」で「PDFに保存」を選ぶ（日本語もきれいに出せる）
+$("pdf").onclick = () => {
+  if (!hasEntries()) return;
+  const area = $("printArea");
+  const h1 = document.createElement("h1");
+  h1.textContent = cur().name;
+  const date = document.createElement("div");
+  date.className = "date";
+  date.textContent = `${fmtDate(cur().createdAt)} ・ ${folderName(cur().folderId)}`;
+  area.replaceChildren(h1, date, ...entries.map((e) => {
+    const para = document.createElement("p");
+    const meta = document.createElement("span");
+    meta.className = "meta";
+    meta.textContent = "";
+    const who = document.createElement("b");
+    who.textContent = e.speaker ? speakerLabel(e) + "：" : "";
+    para.append(meta, who, document.createTextNode(e.text));
+    return para;
+  }));
+  const oldTitle = document.title;
+  document.title = fileBase();  // PDFのファイル名になる
+  window.print();
+  document.title = oldTitle;
+};
+$("clear").onclick = () => {
+  if (confirm(`「${cur().name}」の中身を全部消しますか？`)) { entries.length = 0; persist(); renderAll(); }
+};
+
+
+// ---------------------------------------------------------- Googleドライブに保存（各自のドライブ）
+// ログインすると、文字起こしが自分のGoogleドライブの「文字起こし」フォルダに Googleドキュメントとして保存される。
+// 同じアカウントでログインしたスマホとPCは、数秒ごとにドライブを見て同じ内容になる。
+const GAPI = "https://www.googleapis.com";
+const SCOPE = "https://www.googleapis.com/auth/drive.file openid email";
+const DOC_MIME = "application/vnd.google-apps.document";
+const FOLDER_MIME = "application/vnd.google-apps.folder";
+Object.assign(cloud, {
+  tokenClient: null, token: null, exp: 0, email: "", rootId: null,
+  snap: { folders: {}, docs: {}, audios: {} },  // 最後にドライブと同じだった状態
+  pushTimer: null, pollTimer: null, busy: false, again: false, localLib: null,
+});
+
+async function cloudInit() {
+  let config = {};
+  try { config = await (await fetch("/api/config")).json(); } catch (_) {}
+  const clientId = config.googleClientId || "";
+  if (!clientId || isPhoneModeOnlyRelay()) return;
+  $("account").hidden = false;
+  $("logout").onclick = cloudLogout;
+  if (config.serverLogin) {
+    // 一度ログインすれば、ページを閉じてもログインしたまま（鍵はこの端末の Cookie に暗号化して保存）
+    cloud.server = true;
+    $("login").onclick = () => { location.href = "/api/auth/login?return=" + encodeURIComponent(location.pathname + location.search); };
+    const t = await serverToken();
+    if (t) onGoogleToken(t);
+    return;
+  }
+  await loadScript("https://accounts.google.com/gsi/client").catch(() => null);
+  if (!window.google?.accounts?.oauth2) { $("account").hidden = true; return; }
+  cloud.tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: clientId,
+    scope: SCOPE,
+    callback: onGoogleToken,
+    error_callback: (e) => cloudNotice("Googleログインできませんでした: " + (e?.message || e?.type || "")),
+  });
+  $("login").onclick = () => cloud.tokenClient.requestAccessToken({ prompt: cloud.email ? "" : "select_account" });
+  try { if (localStorage.getItem("mojiokoshi-google")) $("login").textContent = "Googleドライブにつなぐ"; } catch (_) {}
+}
+// QRコードで開いた「マイク役」のスマホは、PCに文字を送るだけなのでログイン不要
+function isPhoneModeOnlyRelay() { return isPhoneMode; }
+
+function cloudNotice(msg, actionLabel, action) {
+  for (const box of [$("cloudNotice"), $("cloudNoticeHome")]) {
+    box.replaceChildren(document.createTextNode(msg));
+    if (actionLabel) {
+      const b = button(actionLabel, () => { $("cloudNotice").hidden = $("cloudNoticeHome").hidden = true; action(); });
+      box.append(b);
+    }
+    box.hidden = !msg;
+  }
+}
+
+async function onGoogleToken(resp) {
+  if (resp.error) { cloudNotice("Googleログインできませんでした: " + resp.error); return; }
+  cloud.token = resp.access_token;
+  cloud.exp = Date.now() + (Number(resp.expires_in) || 3600) * 1000 - 60_000;
+  cloudNotice("");
+  if (cloud.on) { cloudSync(); return; }  // 再接続
+  try {
+    cloud.email = resp.email || (await gfetch("/oauth2/v3/userinfo")).email || "";
+    await cloudStart();
+  } catch (e) {
+    cloudNotice("Googleドライブにつなげませんでした: " + e.message);
+  }
+}
+
+async function serverToken() {
+  try {
+    const res = await fetch("/api/auth/token", { method: "POST" });
+    return res.ok ? await res.json() : null;
+  } catch (_) {
+    return null;
+  }
+}
+// 短時間用の鍵が切れていたら、ログインしたままの鍵から作り直す
+async function ensureToken(force) {
+  if (!force && cloud.token && Date.now() < cloud.exp) return true;
+  if (cloud.server) {
+    const t = await serverToken();
+    if (t) {
+      cloud.token = t.access_token;
+      cloud.exp = Date.now() + (Number(t.expires_in) || 3600) * 1000 - 60_000;
+      return true;
+    }
+  }
+  cloud.token = null;
+  cloudNeedLogin();
+  return false;
+}
+async function gfetch(path, opts = {}, retried = false) {
+  if (!(await ensureToken())) throw new Error("ログインが切れました");
+  const res = await fetch(path.startsWith("http") ? path : GAPI + path, {
+    ...opts,
+    headers: { Authorization: "Bearer " + cloud.token, ...(opts.headers || {}) },
+  });
+  if (res.status === 401) {
+    if (!retried && cloud.server && (await ensureToken(true))) return gfetch(path, opts, true);
+    cloud.token = null;
+    cloudNeedLogin();
+    throw new Error("ログインが切れました");
+  }
+  if (!res.ok) throw new Error(`Google ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  if (opts.raw) return opts.raw === "response" ? res : res.blob();
+  const type = res.headers.get("content-type") || "";
+  return type.includes("json") ? res.json() : res.text();
+}
+function cloudNeedLogin() {
+  cloudNotice("Googleドライブとの接続が切れました。押すとつなぎ直して保存を続けます（それまではこの端末に保存されます）。",
+    "つなぎ直す", () => cloud.server ? $("login").onclick() : cloud.tokenClient.requestAccessToken({ prompt: "" }));
+}
+const q = (s) => encodeURIComponent(s);
+
+async function cloudStart() {
+  // ドライブに「文字起こし」フォルダを用意
+  const found = await gfetch(`/drive/v3/files?q=${q("trashed=false and appProperties has { key='mojiokoshi' and value='root' }")}&fields=files(id)`);
+  cloud.rootId = found.files[0]?.id || (await gfetch("/drive/v3/files?fields=id", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: "文字起こし", mimeType: FOLDER_MIME, appProperties: { mojiokoshi: "root" } }),
+  })).id;
+
+  // この端末だけの保存から、その人のドライブ用に切り替える
+  cloud.localLib = lib;
+  storeKey = "mojiokoshi-cloud-" + cloud.email;
+  let cached = null;
+  try { cached = JSON.parse(localStorage.getItem(storeKey) || "null"); } catch (_) {}
+  lib = cached?.lib || { folders: [], docs: [], currentId: null };
+  lib.audios ||= [];
+  cloud.snap = cached?.snap || { folders: {}, docs: {} };
+  cloud.snap.audios ||= {};
+  cloud.on = true;
+  try { localStorage.setItem("mojiokoshi-google", "1"); } catch (_) {}
+
+  $("login").hidden = true;
+  $("logout").hidden = false;
+  $("accountText").textContent = "👤 " + cloud.email;
+  $("where").textContent = "「💾 保存」を押すと、Googleドライブの「文字起こし」フォルダに保存されます。同じアカウントのスマホとPCで同じ内容が見られます。";
+
+  await cloudPull();
+
+  // ログイン前にこの端末に保存していた分をドライブに移す（1回だけ聞く）
+  const flag = "mojiokoshi-moved-" + cloud.email;
+  const localDocs = cloud.localLib.docs.filter((d) => d.entries?.length || !/^文字起こし \d+\/\d+ \d+:\d{2}$/.test(d.name));
+  let asked = false;
+  try { asked = !!localStorage.getItem(flag); } catch (_) {}
+  if (localDocs.length && !asked) {
+    try { localStorage.setItem(flag, "1"); } catch (_) {}
+    if (confirm(`この端末に保存してある ${localDocs.length}件 の文字起こしを、Googleドライブに移しますか？`)) {
+      const map = {};
+      for (const f of cloud.localLib.folders) {
+        const nf = { id: uid(), name: f.name };
+        map[f.id] = nf.id;
+        lib.folders.push(nf);
+      }
+      for (const d of localDocs) lib.docs.push({ ...d, id: uid(), folderId: map[d.folderId] || "" });
+    }
+  }
+  if (!lib.docs.length) newDoc();
+  if (!lib.docs.some((d) => d.id === lib.currentId)) lib.currentId = lib.docs[0].id;
+  cloud.started = true;
+  openDoc(lib.currentId);
+  persist();
+  clearInterval(cloud.pollTimer);
+  cloud.pollTimer = setInterval(() => { if (!document.hidden) cloudSync(); }, 5000);
+}
+
+function cloudLogout() {
+  if (cloud.server) fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+  else try { google.accounts.oauth2.revoke(cloud.token, () => {}); } catch (_) {}
+  try { localStorage.removeItem("mojiokoshi-google"); } catch (_) {}
+  clearInterval(cloud.pollTimer);
+  Object.assign(cloud, { on: false, token: null, email: "" });
+  lib = cloud.localLib || lib;
+  storeKey = DB_KEY;
+  $("login").hidden = false;
+  $("login").textContent = "Googleでログイン";
+  $("logout").hidden = true;
+  $("accountText").textContent = "";
+  openDoc(cur().id);
+}
+
+// 変更があったら少し待ってからドライブに保存（話している間に何度も送らないように）
+function cloudChanged() {
+  clearTimeout(cloud.pushTimer);
+  cloud.pushTimer = setTimeout(cloudSync, 1200);
+}
+// full = true のときだけ、文章・名前・録音もドライブに保存する（「💾 保存」ボタン）
+async function cloudSync(full = false) {
+  if (!cloud.on || (!cloud.token && !cloud.server)) return false;
+  while (cloud.busy) await new Promise((r) => setTimeout(r, 200));
+  cloud.busy = true;
+  let ok = true;
+  try {
+    await cloudPush(full);
+    await cloudPull();
+    $("accountText").textContent = "👤 " + cloud.email;
+  } catch (e) {
+    ok = false;
+    if (cloud.token) $("accountText").textContent = "👤 " + cloud.email + " ・ " + e.message.slice(0, 40);
+  } finally {
+    cloud.busy = false;
+    try { localStorage.setItem(storeKey, JSON.stringify({ lib, snap: cloud.snap })); } catch (_) {}
+    showSaveState();
+  }
+  return ok;
+}
+
+// ---- ドキュメントの中身（1行 = [時刻] (PC/スマホ) 文章）
+const sig = (list) => list.length + ":" + JSON.stringify(list).length;
+// 1行 = [時刻] (PC/スマホ) 【A 名前】 文章   （【】は話者を分けたときだけ）
+function toText(list) {
+  return list.map((e) => `[${e.time}] (${e.source}) ${e.speaker ? `【${e.speaker}${e.speakerName ? " " + e.speakerName : ""}】 ` : ""}${e.text}`).join("\n");
+}
+function fromText(text) {
+  return text.replace(/^\uFEFF/, "").split(/\r?\n/).map((line) => {
+    const m = line.match(/^\[(.+?)\] \((.+?)\) (.*)$/);
+    if (!m) return line.trim() ? { time: "", source: "", text: line.trim() } : null;
+    const e = { time: m[1], source: m[2], text: m[3] };
+    const sp = e.text.match(/^【([A-Z])(?: ([^】]*))?】 ?(.*)$/);
+    if (sp) {
+      e.speaker = sp[1];
+      if (sp[2]) e.speakerName = sp[2];
+      e.text = sp[3];
+    }
+    return e;
+  }).filter(Boolean);
+}
+function mergeEntries(remote, local) {
+  const key = (e) => `${e.time}|${e.source}|${e.text}`;
+  const localByKey = new Map(local.map((e) => [key(e), e]));
+  const seen = new Set(remote.map(key));
+  // 同じ行で、ドライブ側に話者がまだ付いていなければ、こちらの話者を残す
+  const merged = remote.map((r) => {
+    const l = localByKey.get(key(r));
+    return l?.speaker && !r.speaker ? { ...r, speaker: l.speaker, ...(l.speakerName ? { speakerName: l.speakerName } : {}) } : r;
+  });
+  return [...merged, ...local.filter((e) => !seen.has(key(e)))];
+}
+async function cloudLoadDoc(doc) {
+  try {
+    const text = await gfetch(`/drive/v3/files/${doc.id}/export?mimeType=text/plain`);
+    const remote = fromText(text);
+    const merged = mergeEntries(remote, doc.entries || []);
+    doc.entries = merged;
+    if (doc.id === lib.currentId) entries = doc.entries;
+    const s = cloud.snap.docs[doc.id];
+    if (s) s.sig = sig(remote);
+  } catch (e) {
+    cloudNotice("ドライブから読み込めませんでした: " + e.message);
+  }
+}
+function multipart(meta, text) {
+  const boundary = "mojiokoshi" + Math.random().toString(36).slice(2);
+  const body = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n` +
+    `--${boundary}\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n${text}\r\n--${boundary}--`;
+  return { body, headers: { "Content-Type": "multipart/related; boundary=" + boundary } };
+}
+const parentOf = (folderId) => folderId || cloud.rootId;
+
+// ---- この端末の変更をドライブへ
+async function cloudPush(full) {
+  const snap = cloud.snap;
+  // 新しいフォルダ・名前変更
+  for (const f of lib.folders) {
+    const s = snap.folders[f.id];
+    if (!s) {
+      const created = await gfetch("/drive/v3/files?fields=id", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: f.name, mimeType: FOLDER_MIME, parents: [cloud.rootId], appProperties: { mojiokoshi: "folder" } }),
+      });
+      lib.docs.forEach((d) => { if (d.folderId === f.id) d.folderId = created.id; });
+      f.id = created.id;
+      snap.folders[f.id] = { name: f.name };
+    } else if (s.name !== f.name) {
+      await gfetch(`/drive/v3/files/${f.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: f.name }) });
+      s.name = f.name;
+    }
+  }
+  // 文字起こし
+  for (const d of lib.docs) {
+    const s = snap.docs[d.id];
+    if (!s) {
+      if (!full) continue;  // 新しい文字起こしは「保存」を押したときに作る
+      const meta = {
+        name: d.name, mimeType: DOC_MIME, parents: [parentOf(d.folderId)],
+        appProperties: { mojiokoshi: "doc", createdAt: String(d.createdAt), count: String(d.entries.length) },
+      };
+      const mp = multipart(meta, toText(d.entries));
+      const created = await gfetch("/upload/drive/v3/files?uploadType=multipart&fields=id,modifiedTime", { method: "POST", ...mp });
+      if (lib.currentId === d.id) lib.currentId = created.id;
+      lib.audios.forEach((a) => { if (a.docId === d.id) a.docId = created.id; });
+      if (ai?.docId === d.id) ai.docId = created.id;
+      d.id = created.id;
+      snap.docs[d.id] = { name: d.name, folderId: d.folderId, sig: sig(d.entries), modified: created.modifiedTime };
+      continue;
+    }
+    // フォルダ移動はすぐ反映。名前と中身は「保存」を押したときだけ
+    const metaChanged = (full && s.name !== d.name) || s.folderId !== d.folderId;
+    const bodyChanged = full && d.entries && s.sig !== sig(d.entries);
+    if (!metaChanged && !bodyChanged) continue;
+
+    let url = `/drive/v3/files/${d.id}?fields=id,modifiedTime`;
+    if (s.folderId !== d.folderId) url += `&addParents=${parentOf(d.folderId)}&removeParents=${parentOf(s.folderId)}`;
+    const meta = full ? { name: d.name } : {};
+    let res;
+    if (bodyChanged) {
+      // 別の端末が先に書いていたら、その分を取り込んでから保存（どちらの文章も消えないように）
+      const remote = await gfetch(`/drive/v3/files/${d.id}?fields=modifiedTime`);
+      if (remote.modifiedTime !== s.modified) await cloudLoadDoc(d);
+      meta.appProperties = { count: String(d.entries.length) };
+      const mp = multipart(meta, toText(d.entries));
+      res = await gfetch(url.replace("/drive/v3/", "/upload/drive/v3/") + "&uploadType=multipart", { method: "PATCH", ...mp });
+      s.sig = sig(d.entries);
+    } else {
+      res = await gfetch(url, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(meta) });
+    }
+    if (full) s.name = d.name;
+    s.folderId = d.folderId;
+    s.modified = res.modifiedTime;
+  }
+  // 録音データをドライブへ（文字起こしと同じフォルダに入れる）
+  for (const a of lib.audios) {
+    const doc = lib.docs.find((d) => d.id === a.docId);
+    if (!full || a.driveId || !doc || !snap.docs[doc.id]) continue;
+    const blob = await blobGet(a.id).catch(() => null);
+    if (!blob) continue;
+    const t = new Date(a.start);
+    const m = a.mime.split(";")[0];
+    const ext = { "audio/mpeg": "mp3", "audio/mp3": "mp3", "audio/wav": "wav", "audio/x-wav": "wav", "audio/ogg": "ogg",
+      "audio/aac": "aac", "audio/x-m4a": "m4a", "audio/mp4": "m4a", "video/mp4": "mp4", "video/quicktime": "mov" }[m] || "webm";
+    const start = await gfetch("/upload/drive/v3/files?uploadType=resumable&fields=id", {
+      method: "POST",
+      raw: "response",
+      headers: { "Content-Type": "application/json; charset=UTF-8", "X-Upload-Content-Type": a.mime },
+      body: JSON.stringify({
+        name: `${doc.name}_録音_${t.getHours()}${String(t.getMinutes()).padStart(2, "0")}.${ext}`,
+        mimeType: a.mime.split(";")[0],
+        parents: [parentOf(doc.folderId)],
+        appProperties: { mojiokoshi: "audio", doc: doc.id, start: String(a.start), duration: String(a.duration) },
+      }),
+    });
+    const location = start.headers.get("Location");
+    if (!location) continue;
+    const up = await gfetch(location, { method: "PUT", headers: { "Content-Type": a.mime.split(";")[0] }, body: blob });
+    a.driveId = up.id;
+    snap.audios[up.id] = true;
+  }
+  // 削除（ドライブのゴミ箱へ）
+  const trash = (id) => gfetch(`/drive/v3/files/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ trashed: true }) });
+  for (const id of Object.keys(snap.docs)) {
+    if (!lib.docs.some((d) => d.id === id)) { await trash(id).catch(() => {}); delete snap.docs[id]; }
+  }
+  for (const id of Object.keys(snap.folders)) {
+    if (!lib.folders.some((f) => f.id === id)) { await trash(id).catch(() => {}); delete snap.folders[id]; }
+  }
+  for (const id of Object.keys(snap.audios)) {
+    if (!lib.audios.some((a) => a.driveId === id)) { await trash(id).catch(() => {}); delete snap.audios[id]; }
+  }
+}
+
+// ---- ドライブの変更（別の端末で録音した分など）をこの端末へ
+async function cloudPull() {
+  const query = "trashed=false and (appProperties has { key='mojiokoshi' and value='doc' } or appProperties has { key='mojiokoshi' and value='folder' } or appProperties has { key='mojiokoshi' and value='audio' })";
+  const list = await gfetch(`/drive/v3/files?q=${q(query)}&pageSize=1000&fields=files(id,name,mimeType,parents,modifiedTime,appProperties)`);
+  const snap = cloud.snap;
+  const remoteFolders = list.files.filter((f) => f.mimeType === FOLDER_MIME);
+  const remoteDocs = list.files.filter((f) => f.mimeType === DOC_MIME);
+  const remoteAudios = list.files.filter((f) => f.appProperties?.mojiokoshi === "audio");
+  let changed = false;
+
+  for (const ra of remoteAudios) {
+    if (!lib.audios.some((a) => a.driveId === ra.id)) {
+      const p = ra.appProperties;
+      lib.audios.push({ id: ra.id, driveId: ra.id, docId: p.doc, start: Number(p.start) || 0, duration: Number(p.duration) || 0, mime: ra.mimeType });
+      changed = true;
+    }
+    snap.audios[ra.id] = true;
+  }
+  for (const a of [...lib.audios]) {
+    if (a.driveId && snap.audios[a.driveId] && !remoteAudios.some((r) => r.id === a.driveId)) {
+      lib.audios = lib.audios.filter((x) => x !== a);
+      blobDel(a.id).catch(() => {});
+      delete snap.audios[a.driveId];
+      changed = true;
+    }
+  }
+
+  for (const rf of remoteFolders) {
+    const f = lib.folders.find((x) => x.id === rf.id);
+    if (!f) { lib.folders.push({ id: rf.id, name: rf.name }); changed = true; }
+    else if (f.name !== rf.name && snap.folders[rf.id]?.name === f.name) { f.name = rf.name; changed = true; }
+    snap.folders[rf.id] = { name: rf.name };
+  }
+  for (const f of [...lib.folders]) {
+    if (snap.folders[f.id] && !remoteFolders.some((r) => r.id === f.id)) {
+      lib.folders = lib.folders.filter((x) => x !== f);
+      lib.docs.forEach((d) => { if (d.folderId === f.id) d.folderId = ""; });
+      delete snap.folders[f.id];
+      changed = true;
+    }
+  }
+
+  for (const rd of remoteDocs) {
+    const folderId = rd.parents?.[0] && rd.parents[0] !== cloud.rootId ? rd.parents[0] : "";
+    const updatedAt = Date.parse(rd.modifiedTime);
+    const count = Number(rd.appProperties?.count) || 0;
+    let d = lib.docs.find((x) => x.id === rd.id);
+    const s = snap.docs[rd.id];
+    if (!d) {
+      d = { id: rd.id, name: rd.name, folderId, createdAt: Number(rd.appProperties?.createdAt) || updatedAt, updatedAt, entries: null, count };
+      lib.docs.push(d);
+      snap.docs[rd.id] = { name: rd.name, folderId, sig: "", modified: rd.modifiedTime };
+      changed = true;
+      continue;
+    }
+    if (s && s.modified === rd.modifiedTime) continue;
+    // 別の端末で変更された
+    if (!s || s.name === d.name) d.name = rd.name;
+    if (!s || s.folderId === d.folderId) d.folderId = folderId;
+    d.updatedAt = updatedAt;
+    d.count = count;
+    const localUnsaved = d.entries && s && s.sig !== sig(d.entries);
+    snap.docs[rd.id] = { name: rd.name, folderId, sig: s?.sig || "", modified: rd.modifiedTime };
+    if (d.id === lib.currentId) {
+      await cloudLoadDoc(d);
+      if (localUnsaved) snap.docs[rd.id].sig = "";  // 取り込んだうえで、こちらの分もあとで保存
+    } else if (!localUnsaved) {
+      d.entries = null;  // 開いたときに読み込み直す
+    }
+    if (d.id !== lib.currentId && !recording) showRemoteUpdate(d);
+    changed = true;
+  }
+  for (const d of [...lib.docs]) {
+    if (snap.docs[d.id] && !remoteDocs.some((r) => r.id === d.id)) {
+      lib.docs = lib.docs.filter((x) => x !== d);
+      lib.audios = lib.audios.filter((a) => a.docId !== d.id);
+      delete snap.docs[d.id];
+      changed = true;
+    }
+  }
+  if (!lib.docs.length && cloud.started) newDoc();
+  if (changed && lib.docs.length) {
+    if (!lib.docs.some((d) => d.id === lib.currentId)) lib.currentId = lib.docs[0].id;
+    if (!cur().entries) await cloudLoadDoc(cur());
+    entries = cur().entries;
+    try { localStorage.setItem(storeKey, JSON.stringify({ lib, snap })); } catch (_) {}
+    renderAll();
+  }
+}
+// 別の端末（スマホなど）で更新された文字起こしをお知らせ
+function showRemoteUpdate(d) {
+  cloudNotice(`📱 別の端末で「${d.name}」が更新されました。`, "開く", () => { openDoc(d.id); window.scrollTo({ top: 0 }); });
+}
+
+// ---------------------------------------------------------- 録音の共通部分
+// 文字にする方法は2つ
+//   ai      : 録音した声を Cloudflare の AI（Whisper）に送る。高精度・どのブラウザでもOK・スマホで音が鳴らない
+//   browser : ブラウザ標準の音声認識（Chrome など）。AI の無料分を使い切った日の予備
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+let wakeLock = null;
+let onFinal = (text, at, words) => addEntry(isMobile ? "スマホ" : "PC", text, at, words);
+let onInterim = () => {};
+let engine = "ai";
+try { engine = localStorage.getItem("mojiokoshi-engine") || "ai"; } catch (_) {}
+if (engine === "browser" && !SR) engine = "ai";
+$("engine").value = engine;
+$("engine").onchange = () => {
+  const wasRecording = recording;
+  if (wasRecording) stopRec();
+  engine = $("engine").value;
+  try { localStorage.setItem("mojiokoshi-engine", engine); } catch (_) {}
+  if (engine === "browser" && !SR) $("unsupported").hidden = false;
+  if (wasRecording) startRec();
+};
+
+function setLevelText(t) { $("levelText").textContent = t; }
+// 録音ボタンの文字（録音中は経過時間を出す）
+let recStartedAt = 0, recTimer = null;
+function setRecLabel() {
+  if (recording) {
+    const sec = Math.floor((Date.now() - recStartedAt) / 1000);
+    $("rec").textContent = `■ 停止　${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+    $("recBadge").textContent = `● 録音中 ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+  } else {
+    $("rec").textContent = entries.length ? "● 続きを録音" : "● 録音";
+  }
+}
+function showError(msg) {
+  $("error").textContent = "⚠ " + msg;
+  $("error").hidden = !msg;
+}
+function startRec() {
+  showError("");
+  recording = true;
+  recStartedAt = Date.now();
+  clearInterval(recTimer);
+  recTimer = setInterval(setRecLabel, 1000);
+  $("rec").classList.add("on");
+  setRecLabel();
+  $("recBadge").hidden = false;
+  $("status").textContent = "マイクを準備中…";
+  navigator.wakeLock?.request("screen").then((l) => (wakeLock = l)).catch(() => {});
+  if (engine === "ai") startAi(); else startBrowser();
+}
+function stopRec() {
+  recording = false;
+  stopAi();
+  stopBrowser();
+  clearInterval(recTimer);
+  $("rec").classList.remove("on");
+  setRecLabel();
+  $("recBadge").hidden = true;
+  if (!aiPending) setLive("");
+  $("status").textContent = "";
+  onInterim("");
+  wakeLock?.release?.(); wakeLock = null;
+  $("level").classList.remove("heard");
+  $("level").style.width = "0";
+  setLevelText("停止中");
+}
+$("rec").onclick = () => (recording ? stopRec() : startRec());
+
+// AI が使えないとき（無料分を使い切った日など）はブラウザの音声認識に切り替える
+function fallbackToBrowser(reason) {
+  const wasRecording = recording;
+  if (wasRecording) stopRec();
+  if (!SR) {
+    showError(reason + " このブラウザには予備の音声認識もないため、明日また使えるようになるまでお待ちください。");
+    return;
+  }
+  engine = "browser";
+  $("engine").value = "browser";
+  showError(reason + " ブラウザの音声認識（簡易）に切り替えました。");
+  if (wasRecording) { startRec(); showError(reason + " ブラウザの音声認識（簡易）に切り替えました。"); }
+}
+
+// ---------------------------------------------------------- AI（Whisper）で文字起こし
+// 声を録音して、話の切れ目（無音）で区切って、WAVにしてサーバーへ送る
+const TARGET_RATE = 16000;
+const SILENCE_RMS = 0.012;   // これより小さい音は「無音」扱い
+const MIN_SEC = 2.5;         // 最低この長さたまったら、無音で区切る
+const MAX_SEC = 15;          // 話し続けてもこの長さで区切る
+const SILENCE_SEC = 0.7;     // この長さ無音が続いたら区切る
+
+let ai = null;          // 録音中の音声まわり
+let aiQueue = Promise.resolve();
+let aiPending = 0;
+
+async function startAi() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    showError("このブラウザではマイクが使えません。");
+    stopRec();
+    return;
+  }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 },
+    });
+  } catch (e) {
+    showError(e.name === "NotFoundError"
+      ? "マイクが見つかりません。マイクをつなぐか、下のQRコードでスマホをマイクにしてください。"
+      : "マイクが許可されていません。アドレスバー左のアイコン →「マイク」を「許可」にして、ページを再読み込みしてください。");
+    stopRec();
+    return;
+  }
+  if (!recording) { stream.getTracks().forEach((t) => t.stop()); return; }
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  await ctx.resume();
+  const src = ctx.createMediaStreamSource(stream);
+  const proc = ctx.createScriptProcessor(4096, 1, 1);
+  ai = { stream, ctx, src, proc, chunks: [], samples: 0, silence: 0, hadSpeech: false, level: 0, quietSince: performance.now(),
+         chunkStart: Date.now(), docId: cur().id, recorder: null, parts: [], recStart: Date.now() };
+  // あとで聞けるように、声そのものも録音しておく
+  // iPhone でも再生できる mp4 を優先（対応していないブラウザは webm）
+  const mime = ["audio/mp4;codecs=mp4a.40.2", "audio/mp4", "audio/webm;codecs=opus", "audio/webm"].find((t) => window.MediaRecorder?.isTypeSupported?.(t));
+  if (mime) {
+    try {
+      const rec = new MediaRecorder(stream, { mimeType: mime, audioBitsPerSecond: 32000 });
+      const parts = ai.parts;
+      rec.ondataavailable = (e) => { if (e.data.size) parts.push(e.data); };
+      rec.start(1000);
+      ai.recorder = rec;
+      ai.mime = mime;
+    } catch (_) {}
+  }
+  proc.onaudioprocess = (e) => onAiAudio(e.inputBuffer.getChannelData(0));
+  src.connect(proc);
+  proc.connect(ctx.destination);
+  $("status").textContent = "聞き取り中…（ひと区切り話すと文字になります）";
+}
+function stopAi() {
+  if (!ai) return;
+  flushAi();
+  if (ai.recorder) {
+    const { recorder, parts, recStart, mime } = ai;
+    const docId = ai.docId;
+    recorder.onstop = () => saveRecording(docId, recStart, parts, mime);
+    try { recorder.stop(); } catch (_) {}
+  }
+  ai.proc.disconnect();
+  ai.src.disconnect();
+  ai.stream.getTracks().forEach((t) => t.stop());
+  ai.ctx.close();
+  ai = null;
+}
+function onAiAudio(data) {
+  if (!ai) return;
+  const block = new Float32Array(data);
+  let sum = 0;
+  for (let i = 0; i < block.length; i++) sum += block[i] * block[i];
+  const rms = Math.sqrt(sum / block.length);
+
+  // 音のバー
+  ai.level = ai.level * 0.6 + rms * 0.4;
+  $("level").style.width = Math.min(100, ai.level * 900) + "%";
+  const now = performance.now();
+  if (rms > SILENCE_RMS) { ai.quietSince = now; setLevelText("音が入っています"); }
+  else if (now - ai.quietSince > 3000) setLevelText("音が聞こえません");
+
+  // 話の切れ目で区切る
+  if (!ai.samples) ai.chunkStart = Date.now() - (block.length / ai.ctx.sampleRate) * 1000;
+  ai.chunks.push(block);
+  ai.samples += block.length;
+  if (rms > SILENCE_RMS) { ai.hadSpeech = true; ai.silence = 0; } else { ai.silence += block.length / ai.ctx.sampleRate; }
+  const sec = ai.samples / ai.ctx.sampleRate;
+  if ((sec >= MIN_SEC && ai.silence >= SILENCE_SEC) || sec >= MAX_SEC) flushAi();
+}
+function flushAi() {
+  if (!ai || !ai.samples) return;
+  const all = new Float32Array(ai.samples);
+  let off = 0;
+  for (const c of ai.chunks) { all.set(c, off); off += c.length; }
+  const speech = ai.hadSpeech;
+  const rate = ai.ctx.sampleRate;
+  const at = ai.chunkStart;
+  ai.chunks = []; ai.samples = 0; ai.silence = 0; ai.hadSpeech = false;
+  if (!speech) return; // 無音だけなら送らない
+  sendToAi(encodeWav(downsample(all, rate, TARGET_RATE), TARGET_RATE), at);
+}
+function sendToAi(wav, at) {
+  aiPending++;
+  showPending();
+  // 順番が入れ替わらないように1つずつ送る
+  aiQueue = aiQueue.then(async () => {
+    try {
+      const res = await fetch("/api/transcribe", { method: "POST", body: wav, headers: { "Content-Type": "audio/wav" } });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        if (data.text) onFinal(data.text, at, data.words);
+      } else if (data.error === "quota") {
+        fallbackToBrowser("今日のAIの無料分を使い切りました（料金はかかりません。明日また使えます）。");
+      } else if (res.status === 404 || res.status === 405) {
+        fallbackToBrowser("AIの文字起こしがまだ準備できていません。");
+      } else {
+        showError("AIの文字起こしでエラーが起きました: " + (data.message || res.status));
+      }
+    } catch (_) {
+      showError("サーバーにつながりません。ネット接続を確認してください。");
+    } finally {
+      aiPending--;
+      showPending();
+    }
+  });
+}
+// ---------------------------------------------------------- 音声ファイルから文字起こし
+// ファイルを 16kHz に変換 → 20秒くらいずつ、なるべく静かなところで区切って AI へ → 最後に話者を分ける
+let importing = false;
+$("homeImport").onclick = () => {
+  if (importing) { toast("いま別のファイルを文字起こし中です"); return; }
+  $("importFile").value = "";
+  $("importFile").click();
+};
+$("importFile").onchange = () => {
+  const file = $("importFile").files?.[0];
+  if (file) importAudioFile(file);
+};
+async function importAudioFile(file) {
+  importing = true;
+  const box = $("importBox");
+  const show = (t) => { box.hidden = !t; box.textContent = t; };
+  const doc = newDoc(homeFolder === "all" ? "" : homeFolder);
+  doc.name = file.name.replace(/\.[^.]+$/, "") || doc.name;
+  openDoc(doc.id);
+  showView("editor");
+  show(`📁 「${file.name}」を読み込んでいます…`);
+  try {
+    // 音声を取り出す（ブラウザが 16kHz に変換してくれる）
+    let audioBuf;
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: TARGET_RATE });
+      audioBuf = await ctx.decodeAudioData(await file.arrayBuffer());
+      ctx.close();
+    } catch (_) {
+      throw new Error("このファイルの形式は読み込めませんでした（mp3・m4a・wav などをお試しください）");
+    }
+    const rate = audioBuf.sampleRate;
+    const mono = new Float32Array(audioBuf.length);
+    for (let c = 0; c < audioBuf.numberOfChannels; c++) {
+      const ch = audioBuf.getChannelData(c);
+      for (let i = 0; i < ch.length; i++) mono[i] += ch[i] / audioBuf.numberOfChannels;
+    }
+    const pcm = rate === TARGET_RATE ? mono : downsample(mono, rate, TARGET_RATE);
+    const duration = pcm.length / TARGET_RATE;
+
+    // 元のファイルを「録音」として残す（あとで聞ける・行を押すとその場所から再生）
+    const start = Date.now();
+    const a = { id: uid(), docId: doc.id, start, duration: Math.round(duration), mime: file.type || "audio/mpeg" };
+    await blobPut(a.id, file);
+    lib.audios.push(a);
+    doc.dirty = true;
+    persist();
+
+    // 区切る場所を探す（15〜25秒のあいだで一番静かなところ）
+    const cuts = [0];
+    const win = TARGET_RATE / 10;  // 0.1秒ごとに音の大きさを見る
+    while (cuts[cuts.length - 1] + 25 * TARGET_RATE < pcm.length) {
+      const from = cuts[cuts.length - 1] + 15 * TARGET_RATE, to = cuts[cuts.length - 1] + 25 * TARGET_RATE;
+      let best = to, quiet = Infinity;
+      for (let i = from; i + win <= to; i += win) {
+        let sum = 0;
+        for (let j = i; j < i + win; j++) sum += pcm[j] * pcm[j];
+        if (sum < quiet) { quiet = sum; best = i + win / 2; }
+      }
+      cuts.push(Math.floor(best));
+    }
+    cuts.push(pcm.length);
+
+    for (let k = 0; k < cuts.length - 1; k++) {
+      show(`✍ 文字起こし中… ${k + 1} / ${cuts.length - 1}（${Math.floor(duration / 60)}分${Math.round(duration % 60)}秒のファイル）`);
+      const piece = pcm.subarray(cuts[k], cuts[k + 1]);
+      const res = await fetch("/api/transcribe", { method: "POST", body: encodeWav(piece, TARGET_RATE), headers: { "Content-Type": "audio/wav" } });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error === "quota"
+          ? "今日のAIの無料分を使い切ったため、途中で止まりました（料金はかかりません。明日また使えます）"
+          : "AIの文字起こしでエラーが起きました: " + (data.message || res.status));
+      }
+      if (data.text && lib.docs.includes(doc)) {
+        // 行の時刻 = 読み込んだ時刻 + ファイルの何秒目か（行を押すとその場所から再生できる）
+        const at = start + (cuts[k] / TARGET_RATE) * 1000;
+        const e = { time: new Date(at).toLocaleTimeString("ja-JP"), source: "ファイル", text: data.text.trim() };
+        if (data.words?.length) e.w = data.words;
+        doc.entries.push(e);
+        doc.updatedAt = Date.now();
+        doc.dirty = true;
+        persist();
+        if (doc.id === lib.currentId) render();
+      }
+    }
+    show("");
+    toast("文字起こしが終わりました。話した人を分析しています…");
+    if (file.size <= 50 * 1024 * 1024) diarizeRecording(a, file);
+    else toast("ファイルが大きいため、話者は自動で分けられませんでした。行の印を押すと手で選べます");
+  } catch (err) {
+    show("⚠ " + err.message);
+    setTimeout(() => show(""), 12000);
+  } finally {
+    importing = false;
+  }
+}
+
+function showPending() {
+  const t = aiPending ? "✍ 文字にしています…" : "";
+  setLive(t);
+  onInterim(t);
+}
+function downsample(buf, from, to) {
+  if (from === to) return buf;
+  const ratio = from / to, out = new Float32Array(Math.floor(buf.length / ratio));
+  for (let i = 0; i < out.length; i++) {
+    const st = Math.floor(i * ratio), en = Math.min(buf.length, Math.floor((i + 1) * ratio));
+    let sum = 0;
+    for (let j = st; j < en; j++) sum += buf[j];
+    out[i] = sum / Math.max(1, en - st);
+  }
+  return out;
+}
+function encodeWav(pcm, rate) {
+  const buf = new ArrayBuffer(44 + pcm.length * 2), v = new DataView(buf);
+  const str = (o, t) => { for (let i = 0; i < t.length; i++) v.setUint8(o + i, t.charCodeAt(i)); };
+  str(0, "RIFF"); v.setUint32(4, 36 + pcm.length * 2, true); str(8, "WAVE");
+  str(12, "fmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  str(36, "data"); v.setUint32(40, pcm.length * 2, true);
+  for (let i = 0; i < pcm.length; i++) {
+    const x = Math.max(-1, Math.min(1, pcm[i]));
+    v.setInt16(44 + i * 2, x < 0 ? x * 0x8000 : x * 0x7fff, true);
+  }
+  return new Blob([buf], { type: "audio/wav" });
+}
+
+// ---------------------------------------------------------- ブラウザ標準の音声認識（予備）
+let recog = null, meter = null;
+function startBrowser() {
+  if (!SR) { $("unsupported").hidden = false; stopRec(); return; }
+  recog = new SR();
+  recog.lang = "ja-JP";
+  recog.continuous = true;
+  recog.interimResults = true;
+  recog.onresult = (ev) => {
+    let interim = "";
+    for (let i = ev.resultIndex; i < ev.results.length; i++) {
+      const r = ev.results[i];
+      if (r.isFinal) onFinal(r[0].transcript);
+      else interim += r[0].transcript;
+    }
+    setLive(interim);
+    onInterim(interim);
+  };
+  recog.onstart = () => { $("status").textContent = "聞き取り中…（話すと文字になります）"; };
+  recog.onspeechstart = () => { $("status").textContent = "声を認識しています…"; };
+  recog.onerror = (ev) => {
+    if (ev.error === "no-speech" || ev.error === "aborted") return;
+    const messages = {
+      "not-allowed": "マイクが許可されていません。アドレスバー左のアイコン →「マイク」を「許可」にして、ページを再読み込みしてください。",
+      "service-not-allowed": "このブラウザでは音声認識が使えません。PCは Google Chrome で開いてください。",
+      "audio-capture": "マイクが見つかりません。マイクをつなぐか、下のQRコードでスマホをマイクにしてください。",
+      "network": "音声認識のサーバーにつながりません。ネット接続を確認してください。",
+      "language-not-supported": "このブラウザは日本語の音声認識に対応していません。Google Chrome で開いてください。",
+    };
+    showError(messages[ev.error] || "音声認識エラー: " + ev.error);
+    stopRec();
+  };
+  if (isMobile) {
+    recog.onsoundstart = () => { $("level").classList.add("heard"); setLevelText("音が入っています"); };
+    recog.onsoundend = () => { $("level").classList.remove("heard"); setLevelText("待機中"); };
+  }
+  // 無音が続くとブラウザが勝手に止めるので、録音中なら自動で再開する
+  recog.onend = () => { if (recording && engine === "browser") setTimeout(() => { try { recog.start(); } catch (_) {} }, 250); };
+  recog.start();
+  startMeter();
+}
+function stopBrowser() {
+  if (recog) { try { recog.stop(); } catch (_) {} recog = null; }
+  stopMeter();
+}
+// 音のバー（スマホは音声認識とマイク計測を同時に使うと止まることがあるので、PCだけ）
+async function startMeter() {
+  if (isMobile) { setLevelText("待機中"); return; }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    if (!recording) { stream.getTracks().forEach((t) => t.stop()); return; }
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 1024;
+    ctx.createMediaStreamSource(stream).connect(analyser);
+    const buf = new Float32Array(analyser.fftSize);
+    meter = { stream, ctx, raf: 0, level: 0, quietSince: performance.now() };
+    const tick = () => {
+      if (!meter) return;
+      analyser.getFloatTimeDomainData(buf);
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+      const rms = Math.sqrt(sum / buf.length);
+      meter.level = meter.level * 0.9 + rms * 0.1;
+      $("level").style.width = Math.min(100, meter.level * 900) + "%";
+      const now = performance.now();
+      if (rms > 0.02) { meter.quietSince = now; setLevelText("音が入っています"); }
+      else if (now - meter.quietSince > 3000) setLevelText("音が聞こえません");
+      meter.raf = requestAnimationFrame(tick);
+    };
+    tick();
+  } catch (_) {
+    setLevelText("バー表示できません");
+  }
+}
+function stopMeter() {
+  if (!meter) return;
+  cancelAnimationFrame(meter.raf);
+  meter.stream.getTracks().forEach((t) => t.stop());
+  meter.ctx.close();
+  meter = null;
+}
+
+// ---------------------------------------------------------- スマホ ⇔ PC 接続（Cloudflare の中継サーバー経由）
+// PCとスマホが同じ「部屋」（QRコードのID）につなぎ、中継サーバーがメッセージを受け渡す。
+// Wi-Fiやネットの種類に関係なくつながり、切れても自動でつなぎ直す。
+function openRoom(roomId, onMessage, onState) {
+  let ws = null, closed = false, ping = null;
+  const connect = () => {
+    ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/room/${roomId}`);
+    ws.onopen = () => {
+      onState("open");
+      clearInterval(ping);
+      ping = setInterval(() => { if (ws.readyState === 1) ws.send("ping"); }, 25000);
+    };
+    ws.onmessage = (e) => {
+      if (e.data === "pong") return;
+      let msg;
+      try { msg = JSON.parse(e.data); } catch (_) { return; }
+      onMessage(msg);
+    };
+    ws.onclose = () => {
+      clearInterval(ping);
+      onState("closed");
+      if (!closed) setTimeout(connect, 1500);  // 自動でつなぎ直す
+    };
+  };
+  connect();
+  return {
+    get open() { return ws?.readyState === 1; },
+    send(msg) {
+      if (ws?.readyState !== 1) return false;
+      ws.send(JSON.stringify(msg));
+      return true;
+    },
+    close() { closed = true; ws?.close(); },
+  };
+}
+// 録音データは大きいので、小分けにして送る
+const AUDIO_PART = 180_000;
+function b64encode(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+function b64decode(text) {
+  const bin = atob(text);
+  return Uint8Array.from(bin, (c) => c.charCodeAt(0));
+}
+
+if (typeof qrcode === "undefined" && !isPhoneMode) {
+  $("status").textContent = "QRコードの準備ができませんでした（ネット接続を確認して再読み込みしてください）";
+} else if (!isPhoneMode) {
+  // PC側: 部屋をつくってQRコードを表示（再読み込みしても同じQRコードのまま）
+  $("pairBtn").hidden = false;
+  $("pairBtn").onclick = () => { $("pairCard").hidden = false; };
+  $("pairClose").onclick = () => { $("pairCard").hidden = true; };
+  $("pairCard").onclick = (ev) => { if (ev.target === $("pairCard")) $("pairCard").hidden = true; };
+  let roomId = "";
+  try { roomId = localStorage.getItem("mojiokoshi-room") || ""; } catch (_) {}
+  if (!/^[a-z0-9]{10,32}$/.test(roomId)) {
+    roomId = Array.from(crypto.getRandomValues(new Uint8Array(12)), (n) => "abcdefghijklmnopqrstuvwxyz0123456789"[n % 36]).join("");
+    try { localStorage.setItem("mojiokoshi-room", roomId); } catch (_) {}
+  }
+  const phoneUrl = location.origin + location.pathname + "?room=" + roomId;
+  const qr = qrcode(0, "M");
+  qr.addData(phoneUrl);
+  qr.make();
+  $("qr").innerHTML = qr.createImgTag(6, 8);
+  $("phoneLink").textContent = phoneUrl;
+  $("pairStatus").textContent = "スマホの接続を待っています…";
+  const audioParts = {};
+  relayRoom = openRoom(roomId, (msg) => {
+    if (msg.type === "hello") {
+      relayPeerSeen = true;
+      $("pairStatus").textContent = "✅ スマホがつながりました";
+      $("pairBtn").innerHTML = "📱 スマホ<br>接続中";
+      setTimeout(() => { $("pairCard").hidden = true; }, 1200);
+      relaySync();
+    }
+    if (msg.type === "peer-leave") {
+      $("pairStatus").textContent = "スマホの接続が切れました（スマホでページを開き直すと、自動でつながります）";
+      $("pairBtn").innerHTML = "📱 スマホを<br>マイクに";
+    }
+    // スマホのホーム画面から「この文字起こしを開いて」「新しく作って」
+    if (msg.type === "open" && lib.docs.some((d) => d.id === msg.id)) { openDoc(msg.id); showView("editor"); relaySync(); }
+    if (msg.type === "new") { const doc = newDoc(String(msg.folderId || "")); openDoc(doc.id); showView("editor"); relaySync(); }
+    if (msg.type === "final") { addEntry("スマホ", String(msg.text), Number(msg.at) || Date.now(), Array.isArray(msg.words) ? msg.words : undefined); setLive(""); }
+    if (msg.type === "interim") setLive(String(msg.text || ""));
+    // スマホで話者を変えた・名前を付けた
+    if (msg.type === "speaker") {
+      const e = cur().entries.find((x) => x.time === msg.time && x.text === msg.text);
+      if (e) setSpeaker(e, findAudioAt(e.time)?.audio, String(msg.key).slice(0, 1));
+    }
+    if (msg.type === "rename") {
+      const a = lib.audios.find((x) => x.id === msg.audioId);
+      applyRename(a, String(msg.key).slice(0, 1), String(msg.name || "").slice(0, 40));
+    }
+    if (msg.type === "getaudio") {
+      // スマホから「この録音を聞きたい」
+      const a = lib.audios.find((x) => x.id === msg.id);
+      (async () => {
+        let blob = a ? await blobGet(a.id).catch(() => null) : null;
+        if (!blob && a?.driveId && cloud.on) blob = await gfetch(`/drive/v3/files/${a.driveId}?alt=media`, { raw: true }).catch(() => null);
+        if (!blob) { relayRoom.send({ type: "audio-data", id: msg.id, i: 0, n: 0 }); return; }
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        const n = Math.max(1, Math.ceil(bytes.length / AUDIO_PART));
+        for (let i = 0; i < n; i++) {
+          relayRoom.send({ type: "audio-data", id: msg.id, i, n, mime: a.mime, data: b64encode(bytes.subarray(i * AUDIO_PART, (i + 1) * AUDIO_PART)) });
+        }
+      })();
+    }
+    if (msg.type === "audio-part") {
+      // スマホで録った声を集めて、PCで開いている文字起こしに保存
+      const box = (audioParts[msg.id] ||= { parts: [], got: 0 });
+      if (msg.meta) box.meta = msg.meta;
+      if (!box.parts[msg.i]) { box.parts[msg.i] = b64decode(msg.data); box.got++; }
+      if (box.got === msg.n && box.meta) {
+        delete audioParts[msg.id];
+        const mime = String(box.meta.mime || "audio/webm");
+        saveRecordingBlob(cur().id, Number(box.meta.start) || Date.now(), new Blob(box.parts, { type: mime }), mime, Number(box.meta.duration) || 0);
+        toast("スマホの録音を保存しました");
+      }
+    }
+  }, (state) => {
+    if (state === "closed") $("pairStatus").textContent = "中継サーバーにつなぎ直しています…";
+    else if (!relayPeerSeen) $("pairStatus").textContent = "スマホの接続を待っています…";
+  });
+} else {
+  // スマホ側: PCにつないで、認識した文字と録音を送る（スマホには保存しない）
+  document.body.classList.add("relay");
+  for (const el of [$("saveDoc"), $("newDoc"), $("docFolder"), $("clear"), $("saveState")]) el.hidden = true;
+  $("docName").readOnly = true;
+  $("docName").value = "（PCにつないでいます…）";
+  lib.docs[0].name = "（PCにつないでいます…）";
+  const setStatus = (t) => { if (!recording) $("status").textContent = t; };
+  let pcSeen = false, notFound = null;
+  setStatus("PCに接続中…");
+  relayRoom = openRoom(String(room).toLowerCase().replace(/[^a-z0-9]/g, ""), (msg) => {
+    if (msg.type === "peer-join") relayRoom.send({ type: "hello" });  // PCがあとからつないだ
+    if (msg.type === "peer-leave" && pcSeen) {
+      pcSeen = false;
+      setStatus("PCとの接続が切れました。PCでページを開くと、自動でつながります。");
+    }
+    // PCの一覧と、PCで開いている文字起こしをそのまま映す
+    if (msg.type === "lib") {
+      if (!pcSeen) setStatus("✅ PCにつながりました。録音開始を押して話してください");
+      pcSeen = true;
+      clearTimeout(notFound);
+      lib.folders = msg.folders || [];
+      lib.docs = (msg.docs || []).map((d) => ({ ...d, entries: d.id === msg.current.id ? msg.current.entries : null }));
+      lib.currentId = msg.current.id;
+      lib.audios = msg.audios || [];
+      entries = cur().entries || [];
+      renderAll();
+    }
+    if (msg.type === "audio-data") {
+      // PCから取り寄せた録音
+      if (msg.n === 0) { audioWaiters[msg.id]?.(null); delete audioWaiters[msg.id]; return; }
+      const box = (audioParts[msg.id] ||= { parts: [], got: 0 });
+      if (!box.parts[msg.i]) { box.parts[msg.i] = b64decode(msg.data); box.got++; }
+      if (box.got === msg.n) {
+        delete audioParts[msg.id];
+        audioWaiters[msg.id]?.(new Blob(box.parts, { type: msg.mime }));
+        delete audioWaiters[msg.id];
+      }
+    }
+  }, (state) => {
+    if (state === "open") {
+      relayRoom.send({ type: "hello" });
+      clearTimeout(notFound);
+      notFound = setTimeout(() => { if (!pcSeen) setStatus("PCが見つかりません。PCでこのページを開いたままにして、QRコードを読み取り直してください。"); }, 8000);
+    } else {
+      pcSeen = false;
+      setStatus("つなぎ直しています…");
+    }
+  });
+  const audioParts = {};
+  relayFetchAudio = (a) => new Promise((resolve) => {
+    audioWaiters[a.id] = resolve;
+    if (!relayRoom.send({ type: "getaudio", id: a.id })) { delete audioWaiters[a.id]; resolve(null); return; }
+    setTimeout(() => { if (audioWaiters[a.id]) { delete audioWaiters[a.id]; resolve(null); } }, 60000);
+  });
+  relayOpen = (id) => { relayRoom.send({ type: "open", id }); toast("PCで開いています…"); };
+  relayNew = (folderId) => { relayRoom.send({ type: "new", folderId }); toast("PCで新しい文字起こしを作っています…"); };
+  onFinal = (text, at = Date.now(), words) => {
+    addEntry("スマホ", text, at, words);
+    if (!relayRoom.send({ type: "final", text, at, words }) || !pcSeen) showError("PCとつながっていないため、この文章はPCに届いていない可能性があります。");
+  };
+  onInterim = (text) => { relayRoom.send({ type: "interim", text }); };
+  relaySendAudio = async (blob, start, duration, mime) => {
+    if (!relayRoom.open) { showError("PCとつながっていないため、録音をPCに送れませんでした。"); return; }
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    const id = uid(), n = Math.max(1, Math.ceil(bytes.length / AUDIO_PART));
+    for (let i = 0; i < n; i++) {
+      relayRoom.send({
+        type: "audio-part", id, i, n,
+        meta: i === 0 ? { start, duration, mime } : undefined,
+        data: b64encode(bytes.subarray(i * AUDIO_PART, (i + 1) * AUDIO_PART)),
+      });
+    }
+  };
+}
+cloudInit();

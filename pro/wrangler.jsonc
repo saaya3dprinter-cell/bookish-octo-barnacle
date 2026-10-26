@@ -1,0 +1,27 @@
+{
+  // 文字起こし（有料版）の Cloudflare Workers の設定
+  // 今のサイト（../wrangler.jsonc, mojiokoshi.saaya3dprint.com）とは別の Worker・別のアドレスで動く
+  "name": "mojiokoshi-pro",
+  "main": "src/worker.js",
+  "compatibility_date": "2025-09-01",
+  "workers_dev": true,
+  "routes": [{ "pattern": "app.saaya3dprint.com", "custom_domain": true }],
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
+  // Cloudflare の AI（Whisper で文字起こし、Nova-3 で話者分け）
+  "ai": { "binding": "AI" },
+  // QRコードでつないだPCとスマホの中継
+  "durable_objects": {
+    "bindings": [{ "name": "ROOMS", "class_name": "Room" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }],
+  "vars": {
+    // 今のサイトと同じ Google OAuth クライアント（同じなら、ドライブの既存の文字起こしも開ける）
+    "GOOGLE_CLIENT_ID": "174450966806-r2l88c44o1vkg531t4m9q8dfmr5ulub0.apps.googleusercontent.com"
+  }
+  // 秘密の値（コードには書かない。Cloudflare の画面か `wrangler secret put` で設定）:
+  //   GOOGLE_CLIENT_SECRET
+}
